@@ -1,0 +1,15 @@
+{
+  "short_name": "尚洗管理",
+  "name": "尚洗 Gardiner Car Detail Admin",
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/3082/3082041.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#0f172a",
+  "background_color": "#f8fafc"
+}

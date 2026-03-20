@@ -1,0 +1,23 @@
+
+@import "tailwindcss";
+
+body {
+    font-family: 'Inter', 'Noto Sans TC', sans-serif;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+}
+
+.dark body {
+    background-color: #000000;
+    color: #ffffff;
+}
+
+/* Safe area for iOS notched devices */
+.safe-top { padding-top: env(safe-area-inset-top); }
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+
+@keyframes pulse-custom {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-pulse-sync { animation: pulse-custom 1.5s infinite; }

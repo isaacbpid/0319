@@ -1,0 +1,7 @@
+{
+  "name": "尚洗管理 Admin Gardiner V2",
+  "description": "Professional car detailing and wash management system for Gardiner.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
