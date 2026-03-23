@@ -645,7 +645,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
               </div>
               <div>
                 <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.date}</label>
-                <input type="date" value={editingTr.date} onChange={e => setEditingTr({...editingTr, date: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" />
+                <input type="date" value={editingTr.date.slice(0, 10)} onChange={e => setEditingTr({...editingTr, date: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" />
               </div>
               <div>
                 <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.description}</label>

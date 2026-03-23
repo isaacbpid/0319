@@ -1,8 +1,144 @@
 
 import { createClient } from '@supabase/supabase-js';
-import { Transaction, CloudConfig, AuditAction, AuditLog, Note, CategoryItem, Customer, BankBalanceTransaction, Account } from '../types';
+import { Transaction, TransactionType, CloudConfig, AuditAction, AuditLog, Note, CategoryItem, Customer, BankBalanceTransaction, Account } from '../types';
 
 let supabase: any = null;
+
+export type SyncRemoteTransactionsResult = {
+  success: boolean;
+  error?: string;
+  details?: string;
+  code?: 'VALIDATION_ERROR' | 'DUPLICATE_ID' | 'UPSERT_ERROR' | 'SUPABASE_NOT_INITIALIZED' | 'EXCEPTION';
+  failedTransactionIds?: string[];
+  failedChunkIndex?: number;
+  attemptedCount?: number;
+  completedChunks?: number;
+};
+
+type SyncedTransactionRow = {
+  id: string;
+  receipt_number: string;
+  occurred_at: string;
+  type: TransactionType;
+  category_id: string;
+  from_account_id: string | null;
+  to_account_id: string | null;
+  amount: number;
+  description: string;
+  contributed_by: string;
+  updated_at: string;
+  image_url: string | null;
+  is_initial_investment: boolean;
+  notes: string;
+  customer_id: string | null;
+};
+
+const VALID_TRANSACTION_TYPES = new Set(Object.values(TransactionType));
+
+const normalizeNullableText = (value?: string | null): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const normalizeRequiredText = (value?: string): string => {
+  if (typeof value !== 'string') return '';
+  return value.trim();
+};
+
+const normalizeOccurredAt = (value?: string): string | null => {
+  const raw = normalizeRequiredText(value);
+  if (!raw) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const d = new Date(`${raw}T00:00:00.000Z`);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+};
+
+const normalizeIsoTimestamp = (value?: string): string => {
+  const raw = normalizeRequiredText(value);
+  if (!raw) return new Date().toISOString();
+
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
+};
+
+const buildReceiptNumber = (transaction: Transaction): string => {
+  const existing = normalizeRequiredText(transaction.receiptNumber);
+  if (existing) return existing;
+
+  const normalizedId = normalizeRequiredText(transaction.id).replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  const suffix = (normalizedId.slice(-6) || Date.now().toString().slice(-6)).padStart(6, '0');
+  return `REC-${suffix}`;
+};
+
+const isValidTransactionId = (id: string): boolean => /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/.test(id);
+
+const normalizeTransactionForSync = (transaction: Transaction): { row?: SyncedTransactionRow; errors: string[] } => {
+  const errors: string[] = [];
+  const id = normalizeRequiredText(transaction.id);
+  const occurredAt = normalizeOccurredAt(transaction.date);
+  const categoryId = normalizeRequiredText(transaction.categoryId);
+  const contributedBy = normalizeRequiredText(transaction.contributedBy);
+  const type = transaction.type;
+  const amount = Number(transaction.amount);
+
+  if (!id) {
+    errors.push('Missing id');
+  } else if (!isValidTransactionId(id)) {
+    errors.push('Invalid id format');
+  }
+
+  if (!VALID_TRANSACTION_TYPES.has(type)) {
+    errors.push(`Invalid type: ${String(type)}`);
+  }
+
+  if (!occurredAt) {
+    errors.push('Invalid occurred_at/date value');
+  }
+
+  if (!categoryId) {
+    errors.push('Missing category_id');
+  }
+
+  if (!contributedBy && type !== TransactionType.REVENUE) {
+    errors.push('Missing contributed_by');
+  }
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    errors.push('Amount must be a number greater than 0');
+  }
+
+  if (errors.length > 0) {
+    return { errors };
+  }
+
+  return {
+    row: {
+      id,
+      receipt_number: buildReceiptNumber(transaction),
+      occurred_at: occurredAt!,
+      type,
+      category_id: categoryId,
+      from_account_id: normalizeNullableText(transaction.fromAccountId),
+      to_account_id: normalizeNullableText(transaction.toAccountId),
+      amount,
+      description: normalizeRequiredText(transaction.description),
+      contributed_by: contributedBy,
+      updated_at: normalizeIsoTimestamp(transaction.updatedAt),
+      image_url: normalizeNullableText(transaction.imageUrl),
+      is_initial_investment: Boolean(transaction.isInitialInvestment),
+      notes: normalizeRequiredText(transaction.notes),
+      customer_id: normalizeNullableText(transaction.customerId)
+    },
+    errors
+  };
+};
 
 export const initSupabase = (config: CloudConfig) => {
   console.log("initSupabase called with config:", { ...config, key: config.key ? "PRESENT" : "MISSING" });
@@ -196,7 +332,7 @@ export const fetchRemoteTransactions = async (): Promise<{ data: Transaction[] |
     const mappedData = (data || []).map((t: any) => ({
       id: t.id,
       receiptNumber: t.receipt_number,
-      date: t.occurred_at,
+      date: typeof t.occurred_at === 'string' ? t.occurred_at.slice(0, 10) : t.occurred_at,
       type: t.type,
       categoryId: t.category_id,
       fromAccountId: t.from_account_id,
@@ -226,45 +362,109 @@ export const subscribeToTransactions = (onUpdate: () => void) => {
     .subscribe();
 };
 
-export const syncRemoteTransactions = async (transactions: Transaction[]): Promise<{ success: boolean; error?: string }> => {
-  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+export const syncRemoteTransactions = async (transactions: Transaction[]): Promise<SyncRemoteTransactionsResult> => {
+  if (!supabase) {
+    return {
+      success: false,
+      error: 'Supabase not initialized',
+      code: 'SUPABASE_NOT_INITIALIZED',
+      attemptedCount: transactions.length,
+      completedChunks: 0
+    };
+  }
   if (transactions.length === 0) return { success: true };
 
   try {
-    const cleanTransactions = transactions.map(t => ({
-      id: t.id,
-      receipt_number: t.receiptNumber || `REC-${Math.random().toString(36).substr(2, 5)}`,
-      occurred_at: t.date,
-      type: t.type,
-      category_id: t.categoryId,
-      from_account_id: t.fromAccountId || null,
-      to_account_id: t.toAccountId || null,
-      amount: t.amount,
-      description: t.description || '',
-      contributed_by: t.contributedBy,
-      updated_at: t.updatedAt || new Date().toISOString(),
-      image_url: t.imageUrl || null,
-      is_initial_investment: t.isInitialInvestment || false,
-      notes: t.notes || '',
-      customer_id: t.customerId || null
-    }));
+    const validationFailures: string[] = [];
+    const cleanTransactions: SyncedTransactionRow[] = [];
+    const seenIds = new Set<string>();
+    const duplicateIds = new Set<string>();
+
+    for (const transaction of transactions) {
+      const normalized = normalizeTransactionForSync(transaction);
+      if (!normalized.row) {
+        const idForError = normalizeRequiredText(transaction.id) || '(missing-id)';
+        validationFailures.push(`${idForError}: ${normalized.errors.join(', ')}`);
+        continue;
+      }
+
+      if (seenIds.has(normalized.row.id)) {
+        duplicateIds.add(normalized.row.id);
+      } else {
+        seenIds.add(normalized.row.id);
+      }
+
+      cleanTransactions.push(normalized.row);
+    }
+
+    if (duplicateIds.size > 0) {
+      const ids = Array.from(duplicateIds);
+      return {
+        success: false,
+        error: `Duplicate transaction IDs in batch: ${ids.join(', ')}`,
+        details: 'Each transaction in a sync batch must have a unique id.',
+        code: 'DUPLICATE_ID',
+        failedTransactionIds: ids,
+        attemptedCount: transactions.length,
+        completedChunks: 0
+      };
+    }
+
+    if (validationFailures.length > 0) {
+      const failedIds = validationFailures
+        .map(f => f.split(':')[0])
+        .filter(Boolean);
+
+      return {
+        success: false,
+        error: `Transaction validation failed for ${validationFailures.length} row(s).`,
+        details: validationFailures.slice(0, 5).join(' | '),
+        code: 'VALIDATION_ERROR',
+        failedTransactionIds: failedIds,
+        attemptedCount: transactions.length,
+        completedChunks: 0
+      };
+    }
 
     const chunkSize = 5; // Slightly larger chunks for speed
+    let completedChunks = 0;
     for (let i = 0; i < cleanTransactions.length; i += chunkSize) {
       const chunk = cleanTransactions.slice(i, i + chunkSize);
+      const chunkIndex = Math.floor(i / chunkSize);
       const { error } = await supabase
         .from('transactions')
         .upsert(chunk, { onConflict: 'id' });
       
       if (error) {
-        console.error('Sync Chunk Error:', error);
-        return { success: false, error: error.message };
+        const failedIds = chunk.map(row => row.id);
+        console.error('Sync Chunk Error:', { chunkIndex, failedIds, error });
+        return {
+          success: false,
+          error: `[chunk ${chunkIndex + 1}] ${error.message}`,
+          details: `Failed transaction IDs: ${failedIds.join(', ')}`,
+          code: 'UPSERT_ERROR',
+          failedTransactionIds: failedIds,
+          failedChunkIndex: chunkIndex,
+          attemptedCount: cleanTransactions.length,
+          completedChunks
+        };
       }
+
+      completedChunks += 1;
     }
     
-    return { success: true };
+    return {
+      success: true,
+      attemptedCount: cleanTransactions.length,
+      completedChunks
+    };
   } catch (e: any) {
-    return { success: false, error: e.message };
+    return {
+      success: false,
+      error: e?.message || 'Unexpected sync exception',
+      code: 'EXCEPTION',
+      attemptedCount: transactions.length
+    };
   }
 };
 

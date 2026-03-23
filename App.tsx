@@ -22,6 +22,36 @@ const QUICK_CONNECT_CONFIG: CloudConfig = {
   key: process.env.SUPABASE_ANON_KEY || ""
 };
 
+const buildTransactionNotes = (transactions: Transaction[]): Note[] => {
+  return transactions
+    .filter(transaction => transaction.notes && transaction.notes.trim().length > 0)
+    .map(transaction => {
+      const timestamp = new Date().toISOString();
+      return {
+      id: crypto.randomUUID(),
+      content: [
+        `[${timestamp}] Transaction Note`,
+        `Transaction ID: ${transaction.id}`,
+        `Receipt: ${transaction.receiptNumber || 'N/A'}`,
+        `Date: ${transaction.date}`,
+        '',
+        transaction.notes!.trim()
+      ].join('\n'),
+      createdBy: 'system',
+      createdAt: timestamp,
+      updatedAt: timestamp
+      };
+    });
+};
+
+const shouldCreateTransactionNote = (previous: Transaction | undefined, next: Transaction): boolean => {
+  const nextText = (next.notes || '').trim();
+  if (!nextText) return false;
+
+  const previousText = (previous?.notes || '').trim();
+  return previousText !== nextText;
+};
+
 class ErrorBoundary extends React.Component<any, any> {
   state = { hasError: false, error: null };
 
@@ -93,6 +123,34 @@ const App: React.FC = () => {
   const [serverTime, setServerTime] = useState<string>('');
 
   const isReadOnly = syncStatus === 'error' || isForcedReadOnly;
+
+  const formatTransactionSyncError = (
+    result: {
+      error?: string;
+      details?: string;
+      failedChunkIndex?: number;
+      failedTransactionIds?: string[];
+    },
+    fallback: string
+  ): string => {
+    const base = result.error || fallback;
+    const parts: string[] = [];
+
+    if (typeof result.failedChunkIndex === 'number') {
+      parts.push(`chunk ${result.failedChunkIndex + 1}`);
+    }
+
+    if (result.failedTransactionIds && result.failedTransactionIds.length > 0) {
+      parts.push(`ids: ${result.failedTransactionIds.slice(0, 5).join(', ')}`);
+    }
+
+    if (result.details) {
+      parts.push(result.details);
+    }
+
+    if (parts.length === 0) return base;
+    return `${base} | ${parts.join(' | ')}`;
+  };
 
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
@@ -399,7 +457,11 @@ const App: React.FC = () => {
         setShowSuccessOverlay(true);
         setTimeout(() => setShowSuccessOverlay(false), 2000);
       } else {
-        setLastError(resTr.error || resNotes.error || resCats.error || resCust.error || resAcc.error || 'Push failed');
+        setLastError(
+          resTr.success
+            ? (resNotes.error || resCats.error || resCust.error || resAcc.error || 'Push failed')
+            : formatTransactionSyncError(resTr, 'Push failed')
+        );
         setSyncStatus('error');
       }
     } catch (e: any) {
@@ -514,7 +576,7 @@ const App: React.FC = () => {
           setLastSync(new Date());
           setTransactions(newTransactions);
         } else {
-          setLastError(result.error || 'Auto-sync failed');
+          setLastError(formatTransactionSyncError(result, 'Auto-sync failed'));
           setSyncStatus('error');
           alert(language === 'zh' ? '同步失敗，請檢查網絡' : 'Sync failed, please check network');
         }
@@ -539,6 +601,7 @@ const App: React.FC = () => {
     const newItems = Array.isArray(transaction) 
       ? transaction.map(tr => ({ ...tr, updatedAt: now }))
       : [{ ...transaction, updatedAt: now }];
+    const generatedNotes = buildTransactionNotes(newItems);
     
     try {
       if (cloudConfig) {
@@ -546,6 +609,19 @@ const App: React.FC = () => {
         // Only sync the new items
         const result = await syncRemoteTransactions(newItems);
         if (result.success) {
+          if (generatedNotes.length > 0) {
+            const updatedNotes = [...generatedNotes, ...notes];
+            const notesResult = await syncRemoteNotes(updatedNotes);
+            if (!notesResult.success) {
+              setLastError(notesResult.error || 'Transactions saved, but note sync failed');
+              setSyncStatus('error');
+              await loadData(false);
+              alert(language === 'zh' ? '交易已保存，但備註同步失敗。' : 'Transactions were saved, but note sync failed.');
+              return;
+            }
+            setNotes(updatedNotes);
+          }
+
           setSyncStatus('cloud');
           setLastSync(new Date());
           logAuditEvent(AuditAction.CREATE, 'transactions', newItems[0].id, undefined, undefined, newItems);
@@ -559,12 +635,15 @@ const App: React.FC = () => {
           // Refresh from DB to ensure local state is perfectly in sync
           await loadData(false);
         } else {
-          setLastError(result.error || 'Sync failed');
+          setLastError(formatTransactionSyncError(result, 'Sync failed'));
           setSyncStatus('error');
           alert(language === 'zh' ? '同步失敗，請檢查網絡' : 'Sync failed, please check network');
         }
       } else {
         setTransactions([...newItems, ...transactions]);
+        if (generatedNotes.length > 0) {
+          setNotes([...generatedNotes, ...notes]);
+        }
         setLastAction({ type: 'add', data: newItems });
         setShowUndoToast(true);
         setTimeout(() => setShowUndoToast(false), 5000);
@@ -614,24 +693,44 @@ const App: React.FC = () => {
   const updateTransaction = async (updatedTr: Transaction) => {
     setIsSyncing(true);
     const now = new Date().toISOString();
+    const existing = transactions.find(tr => tr.id === updatedTr.id);
     const updatedItem = { ...updatedTr, updatedAt: now };
+    const generatedNotes = shouldCreateTransactionNote(existing, updatedItem)
+      ? buildTransactionNotes([updatedItem])
+      : [];
     
     try {
       if (cloudConfig) {
         setSyncStatus('syncing');
         const result = await syncRemoteTransactions([updatedItem]);
         if (result.success) {
+          if (generatedNotes.length > 0) {
+            const updatedNotes = [...generatedNotes, ...notes];
+            const notesResult = await syncRemoteNotes(updatedNotes);
+            if (!notesResult.success) {
+              setLastError(notesResult.error || 'Transaction updated, but note sync failed');
+              setSyncStatus('error');
+              await loadData(false);
+              alert(language === 'zh' ? '交易已更新，但備註同步失敗。' : 'Transaction updated, but note sync failed.');
+              return;
+            }
+            setNotes(updatedNotes);
+          }
+
           setSyncStatus('cloud');
           setLastSync(new Date());
           logAuditEvent(AuditAction.UPDATE, 'transactions', updatedTr.id, undefined, undefined, updatedTr);
           await loadData(false);
         } else {
-          setLastError(result.error || 'Update failed');
+          setLastError(formatTransactionSyncError(result, 'Update failed'));
           setSyncStatus('error');
           alert(language === 'zh' ? '更新失敗' : 'Update failed');
         }
       } else {
         setTransactions(transactions.map(tr => tr.id === updatedTr.id ? updatedItem : tr));
+        if (generatedNotes.length > 0) {
+          setNotes([...generatedNotes, ...notes]);
+        }
       }
     } finally {
       setIsSyncing(false);
@@ -653,7 +752,7 @@ const App: React.FC = () => {
           logAuditEvent(AuditAction.UPDATE, 'transactions', updatedItems[0].id, undefined, undefined, updatedItems);
           await loadData(false);
         } else {
-          setLastError(result.error || 'Bulk update failed');
+          setLastError(formatTransactionSyncError(result, 'Bulk update failed'));
           setSyncStatus('error');
           alert(language === 'zh' ? '批量更新失敗' : 'Bulk update failed');
         }

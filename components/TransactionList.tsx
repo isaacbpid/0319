@@ -22,6 +22,31 @@ type DateFilter = 'ALL' | 'TODAY' | 'WEEK' | 'MONTH' | 'CUSTOM';
 
 const TransactionList: React.FC<TransactionListProps> = ({ transactions, accounts, onDelete, onUpdate, onBulkUpdate, onExportExcel, onExportJSON, language, isSyncing, isReadOnly, filter }) => {
   const t = translations[language];
+  const normalizedAccounts = useMemo(() => {
+    const cleaned = (accounts || [])
+      .filter(account => account && typeof account.id === 'string' && account.id.trim())
+      .map(account => ({
+        ...account,
+        id: account.id.trim(),
+        name: typeof account.name === 'string' && account.name.trim() ? account.name.trim() : account.id.trim(),
+        type: typeof account.type === 'string' ? account.type : ''
+      }));
+
+    if (cleaned.length > 0) return cleaned;
+
+    return [
+      { id: 'Bank', name: 'Bank', type: 'company_bank', createdAt: '' },
+      { id: 'Cash', name: 'Cash', type: 'cash', createdAt: '' },
+      { id: 'User 1', name: 'User 1', type: 'partner_personal', createdAt: '' },
+      { id: 'User 2', name: 'User 2', type: 'partner_personal', createdAt: '' }
+    ];
+  }, [accounts]);
+
+  const getAccountName = (accountId?: string) => {
+    if (!accountId) return 'Unknown';
+    return normalizedAccounts.find(a => a.id === accountId)?.name || accountId;
+  };
+
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<'ALL' | TransactionType>('ALL');
   const [sizeFilter, setSizeFilter] = useState<SizeFilter>('ALL');
@@ -527,7 +552,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                         <div className="flex items-center gap-1.5">
                           <span className="text-[8px] font-black text-rose-500 uppercase tracking-widest">{language === 'zh' ? '出' : 'From'}:</span>
                           <span className="text-[10px] font-bold text-slate-600 dark:text-slate-300">
-                            {accounts?.find(a => a.id === tr.fromAccountId)?.name || 'Unknown'}
+                            {getAccountName(tr.fromAccountId)}
                           </span>
                         </div>
                       )}
@@ -535,7 +560,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                         <div className="flex items-center gap-1.5">
                           <span className="text-[8px] font-black text-emerald-500 uppercase tracking-widest">{language === 'zh' ? '入' : 'To'}:</span>
                           <span className="text-[10px] font-bold text-slate-600 dark:text-slate-300">
-                            {accounts?.find(a => a.id === tr.toAccountId)?.name || 'Unknown'}
+                            {getAccountName(tr.toAccountId)}
                           </span>
                         </div>
                       )}
@@ -611,7 +636,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                         <div className="flex items-center gap-1">
                           <span className="text-[7px] font-black text-rose-500 uppercase tracking-widest">{language === 'zh' ? '出' : 'From'}:</span>
                           <span className="text-[9px] font-bold text-slate-500 dark:text-slate-400">
-                            {accounts?.find(a => a.id === tr.fromAccountId)?.name || 'Unknown'}
+                            {getAccountName(tr.fromAccountId)}
                           </span>
                         </div>
                       )}
@@ -619,7 +644,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                         <div className="flex items-center gap-1">
                           <span className="text-[7px] font-black text-emerald-500 uppercase tracking-widest">{language === 'zh' ? '入' : 'To'}:</span>
                           <span className="text-[9px] font-bold text-slate-500 dark:text-slate-400">
-                            {accounts?.find(a => a.id === tr.toAccountId)?.name || 'Unknown'}
+                            {getAccountName(tr.toAccountId)}
                           </span>
                         </div>
                       )}
@@ -732,7 +757,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
 
                <div>
                  <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.date}</label>
-                 <input type="date" value={editingTr.date} onChange={e => setEditingTr({...editingTr, date: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" />
+                 <input type="date" value={editingTr.date.slice(0, 10)} onChange={e => setEditingTr({...editingTr, date: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" />
                </div>
 
                <div>
@@ -759,9 +784,9 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                </div>
 
                <div>
-                  <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.transactionNotes}</label>
+                  <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.transactionNotes} {language === 'zh' ? '(手動輸入)' : '(Manual entry)'}</label>
                   <div className="relative">
-                    <textarea value={editingTr.notes || ''} onChange={e => setEditingTr({...editingTr, notes: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" rows={3} placeholder={language === 'zh' ? '輸入交易備註 (Notepad)...' : 'Enter transaction notes (Notepad)...'}></textarea>
+                    <textarea value={editingTr.notes || ''} onChange={e => setEditingTr({...editingTr, notes: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" rows={3} placeholder={language === 'zh' ? '手動輸入備註，不會自動帶入分類...' : 'Enter notes manually. This will not auto-copy category...'}></textarea>
                   </div>
                </div>
 
@@ -774,8 +799,8 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
                     >
                       <option value="">None</option>
-                      {accounts.map(a => (
-                        <option key={a.id} value={a.id}>{a.name}</option>
+                      {normalizedAccounts.map(a => (
+                        <option key={a.id} value={a.id}>{a.id} - {a.name}</option>
                       ))}
                     </select>
                   </div>
@@ -787,8 +812,8 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
                     >
                       <option value="">None</option>
-                      {accounts.map(a => (
-                        <option key={a.id} value={a.id}>{a.name}</option>
+                      {normalizedAccounts.map(a => (
+                        <option key={a.id} value={a.id}>{a.id} - {a.name}</option>
                       ))}
                     </select>
                   </div>

@@ -17,6 +17,7 @@ const AccountsPage: React.FC<AccountsPageProps> = ({ accounts, onUpdateAccount, 
   const [isAdding, setIsAdding] = useState(false);
 
   const [formData, setFormData] = useState<Partial<Account>>({
+    id: '',
     name: '',
     type: AccountType.COMPANY_BANK
   });
@@ -36,10 +37,10 @@ const AccountsPage: React.FC<AccountsPageProps> = ({ accounts, onUpdateAccount, 
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.name) return;
+    if (!formData.name || !formData.id) return;
 
     const accountToSave: Account = {
-      id: editingAccount?.id || crypto.randomUUID(),
+      id: formData.id!,
       name: formData.name!,
       type: (formData.type as AccountType) || AccountType.COMPANY_BANK,
       createdAt: editingAccount?.createdAt || new Date().toISOString()
@@ -50,7 +51,8 @@ const AccountsPage: React.FC<AccountsPageProps> = ({ accounts, onUpdateAccount, 
     setEditingAccount(null);
     setFormData({
       name: '',
-      type: AccountType.COMPANY_BANK
+      type: AccountType.COMPANY_BANK,
+      id: ''
     });
   };
 
@@ -93,7 +95,15 @@ const AccountsPage: React.FC<AccountsPageProps> = ({ accounts, onUpdateAccount, 
         </h2>
         {!isReadOnly && (
           <button 
-            onClick={() => setIsAdding(true)}
+            onClick={() => {
+              setIsAdding(true);
+              setEditingAccount(null);
+              setFormData({
+                id: '',
+                name: '',
+                type: AccountType.COMPANY_BANK
+              });
+            }}
             className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-2xl text-xs font-black uppercase tracking-widest transition-all active:scale-95 shadow-lg shadow-blue-600/20"
           >
             <i className="fas fa-plus mr-2"></i>
@@ -110,9 +120,19 @@ const AccountsPage: React.FC<AccountsPageProps> = ({ accounts, onUpdateAccount, 
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
+                <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{language === 'zh' ? '賬戶代碼' : 'Account ID'}</label>
+                <input 
+                  type="text" required value={formData.id || ''}
+                  onChange={e => setFormData({...formData, id: e.target.value})}
+                  disabled={!!editingAccount}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                  placeholder="e.g. BANK_1, CASH, ALIPAY"
+                />
+              </div>
+              <div>
                 <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{language === 'zh' ? '賬戶名稱' : 'Account Name'}</label>
                 <input 
-                  type="text" required value={formData.name}
+                  type="text" required value={formData.name || ''}
                   onChange={e => setFormData({...formData, name: e.target.value})}
                   className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
                   placeholder="e.g. Bank of China / Alipay"
@@ -121,7 +141,7 @@ const AccountsPage: React.FC<AccountsPageProps> = ({ accounts, onUpdateAccount, 
               <div>
                 <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{language === 'zh' ? '賬戶類型' : 'Account Type'}</label>
                 <select 
-                  value={formData.type}
+                  value={formData.type || AccountType.COMPANY_BANK}
                   onChange={e => setFormData({...formData, type: e.target.value as AccountType})}
                   className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
                 >
@@ -164,6 +184,7 @@ const AccountsPage: React.FC<AccountsPageProps> = ({ accounts, onUpdateAccount, 
                 <h4 className="text-sm font-black text-slate-900 dark:text-white uppercase tracking-tight">
                   {account.name}
                 </h4>
+                <p className="text-[9px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest mt-0.5">{account.id}</p>
                 <div className="flex gap-2 mt-1">
                   <span className="text-[9px] font-black px-2 py-0.5 bg-slate-100 dark:bg-white/5 text-slate-500 dark:text-slate-400 rounded-full uppercase tracking-widest">{account.type.toUpperCase()}</span>
                 </div>
