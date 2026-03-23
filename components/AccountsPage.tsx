@@ -74,7 +74,7 @@ const AccountsPage: React.FC<AccountsPageProps> = ({ accounts, onUpdateAccount, 
             <div className="flex gap-3">
               <button 
                 onClick={() => confirmDelete(deletingId)}
-                className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-black py-4 rounded-2xl shadow-xl shadow-rose-600/20 transition-all active:scale-95 text-xs uppercase tracking-widest"
+                className="flex-1 bg-rose-700 hover:bg-rose-800 text-white dark:text-white border border-rose-800 font-black py-4 rounded-2xl shadow-xl shadow-rose-700/30 transition-all active:scale-95 text-xs uppercase tracking-widest"
               >
                 {language === 'zh' ? '確認刪除' : 'Delete'}
               </button>

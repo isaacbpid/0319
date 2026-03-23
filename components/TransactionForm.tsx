@@ -1,11 +1,11 @@
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Transaction, TransactionType, Category, Owner, CategoryItem, Customer, Account } from '../types';
+import { Transaction, TransactionType, Category, Owner, CategoryItem, Customer, Account, AccountType } from '../types';
 import { scanReceipt } from '../services/geminiService';
 import { translations } from '../translations';
 
 interface TransactionFormProps {
-  onAdd: (tr: Transaction | Transaction[]) => void;
+  onAdd: (tr: Transaction | Transaction[], transactionNoteText?: string) => void;
   language: 'zh' | 'en';
   transactions: Transaction[];
   categories: CategoryItem[];
@@ -20,6 +20,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
   const [loading, setLoading] = useState(false);
   const [isSplit, setIsSplit] = useState(true); // Default to split
   const [imageUrl, setImageUrl] = useState<string | undefined>(undefined);
+  const [transactionNoteText, setTransactionNoteText] = useState('');
   const [validationIssue, setValidationIssue] = useState<{ field: string; message: string } | null>(null);
   const [formData, setFormData] = useState({
     type: TransactionType.EXPENSE,
@@ -38,6 +39,9 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
   });
 
   const isRevenue = formData.type === TransactionType.REVENUE;
+  const isExpense = formData.type === TransactionType.EXPENSE;
+  const isOwnerInvestment = formData.type === TransactionType.OWNER_INVESTMENT;
+  const isOwnerWithdrawal = formData.type === TransactionType.OWNER_WITHDRAWAL;
 
   const normalizedAccounts = useMemo(() => {
     const cleaned = (accounts || [])
@@ -69,21 +73,31 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
     return categories.filter(category => category.type === TransactionType.REVENUE);
   }, [categories]);
 
+  const expenseCategories = useMemo(() => {
+    return categories.filter(category => category.type === TransactionType.EXPENSE);
+  }, [categories]);
+
   const filteredCategories = useMemo(() => {
-    return isRevenue ? revenueCategories : categories;
-  }, [categories, isRevenue, revenueCategories]);
+    if (isRevenue) return revenueCategories;
+    if (isExpense) return expenseCategories;
+    return categories;
+  }, [categories, isExpense, isRevenue, expenseCategories, revenueCategories]);
 
   const selectedCategory = useMemo(() => {
     return categories.find(category => category.id === formData.categoryId) || null;
   }, [categories, formData.categoryId]);
 
   const fromAccounts = useMemo(() => {
+    if (isOwnerInvestment) return normalizedAccounts.filter(a => a.type === AccountType.PARTNER_PERSONAL);
+    if (isOwnerWithdrawal) return normalizedAccounts.filter(a => a.type !== AccountType.PARTNER_PERSONAL);
     return normalizedAccounts;
-  }, [normalizedAccounts]);
+  }, [normalizedAccounts, isOwnerInvestment, isOwnerWithdrawal]);
 
   const toAccounts = useMemo(() => {
+    if (isOwnerInvestment) return normalizedAccounts.filter(a => a.type !== AccountType.PARTNER_PERSONAL);
+    if (isOwnerWithdrawal) return normalizedAccounts.filter(a => a.type === AccountType.PARTNER_PERSONAL);
     return normalizedAccounts;
-  }, [normalizedAccounts]);
+  }, [normalizedAccounts, isOwnerInvestment, isOwnerWithdrawal]);
 
   const accountIdSet = useMemo(() => new Set(normalizedAccounts.map(a => a.id)), [normalizedAccounts]);
 
@@ -107,14 +121,24 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
         ? prev.categoryId
         : (revenueCategories[0]?.id || '');
       const nextDescription = prev.description;
-      const nextToAccountId = prev.toAccountId;
+      // Default toAccountId to 'Cash' if not set and if 'Cash' exists in accounts
+      let nextToAccountId = prev.toAccountId;
+      if (!nextToAccountId) {
+        const cashAccount = toAccounts.find(a => a.name === 'Cash' || a.id === 'Cash');
+        if (cashAccount) {
+          nextToAccountId = cashAccount.id;
+        }
+      }
+      const nextContributedBy = prev.contributedBy && accountIdSet.has(prev.contributedBy)
+        ? prev.contributedBy
+        : Owner.OWNER_A;
 
       if (
         prev.categoryId === nextCategoryId &&
         prev.description === nextDescription &&
         prev.fromAccountId === '' &&
         prev.fundedBy === 'Bank' &&
-        prev.contributedBy === '' &&
+        prev.contributedBy === nextContributedBy &&
         prev.toAccountId === nextToAccountId
       ) {
         return prev;
@@ -126,11 +150,49 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
         description: nextDescription,
         fromAccountId: '',
         fundedBy: 'Bank',
-        contributedBy: '',
+        contributedBy: nextContributedBy,
         toAccountId: nextToAccountId
       };
     });
-  }, [isRevenue, revenueCategories]);
+  }, [isRevenue, revenueCategories, accountIdSet, toAccounts]);
+
+  useEffect(() => {
+    if (!isExpense) {
+      return;
+    }
+
+    setFormData(prev => {
+      const nextCategoryId = expenseCategories.some(category => category.id === prev.categoryId)
+        ? prev.categoryId
+        : (expenseCategories[0]?.id || '');
+      const nextDescription = prev.description;
+      // Default fromAccountId to 'Cash' if not set and if 'Cash' exists in accounts
+      let nextFromAccountId = prev.fromAccountId;
+      if (!nextFromAccountId) {
+        const cashAccount = fromAccounts.find(a => a.name === 'Cash' || a.id === 'Cash');
+        if (cashAccount) {
+          nextFromAccountId = cashAccount.id;
+        }
+      }
+
+      if (
+        prev.categoryId === nextCategoryId &&
+        prev.description === nextDescription &&
+        prev.fromAccountId === nextFromAccountId &&
+        prev.toAccountId === ''
+      ) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        categoryId: nextCategoryId,
+        description: nextDescription,
+        fromAccountId: nextFromAccountId,
+        toAccountId: ''
+      };
+    });
+  }, [expenseCategories, isExpense, isSplit, fromAccounts]);
 
   useEffect(() => {
     // Default Split to ON for business operations (Revenue, Expense)
@@ -141,6 +203,15 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
       setIsSplit(false);
     }
   }, [formData.type]);
+
+  useEffect(() => {
+    if (!isOwnerInvestment && !isOwnerWithdrawal) return;
+    const targetCategoryId = isOwnerInvestment ? 'owner_investment' : 'owner_withdrawal';
+    setFormData(prev => {
+      if (prev.categoryId === targetCategoryId && prev.fromAccountId === '' && prev.toAccountId === '') return prev;
+      return { ...prev, categoryId: targetCategoryId, fromAccountId: '', toAccountId: '' };
+    });
+  }, [isOwnerInvestment, isOwnerWithdrawal]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
@@ -233,7 +304,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
       return { field: 'categoryId', message: language === 'zh' ? 'Revenue 必須選擇有效的收入分類。' : 'Revenue requires a valid revenue category.' };
     }
 
-    if (!isRevenue && !isSplit && !formData.contributedBy.trim()) {
+    if (!isSplit && !formData.contributedBy.trim()) {
       return { field: 'contributedBy', message: language === 'zh' ? '請選擇出資人。' : 'Contributor is required.' };
     }
 
@@ -245,10 +316,14 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
       return { field: 'toAccountId', message: language === 'zh' ? '入賬賬戶無效，請重新選擇。' : 'Invalid to account. Please reselect.' };
     }
 
-    if (formData.type === TransactionType.ADD_RMB || formData.type === TransactionType.CASH_OUT) {
+    if (formData.type === TransactionType.OWNER_INVESTMENT || formData.type === TransactionType.OWNER_WITHDRAWAL) {
       if (!formData.fromAccountId || !formData.toAccountId) {
         return { field: 'general', message: language === 'zh' ? 'Owner 轉賬必須同時選擇出賬與入賬賬戶。' : 'Owner transfer requires both from and to accounts.' };
       }
+    }
+
+    if (isExpense && !formData.fromAccountId) {
+      return { field: 'fromAccountId', message: language === 'zh' ? 'Expense 必須選擇出賬賬戶。' : 'Expense requires a from account.' };
     }
 
     if (isRevenue) {
@@ -257,11 +332,8 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
       }
     }
 
-    if (!isRevenue && formData.fundedBy !== 'Bank') {
-      const ownerAccount = accounts.find(acc => acc.name === formData.fundedBy);
-      if (!ownerAccount) {
-        return { field: 'fundedBy', message: language === 'zh' ? '找不到對應的業主賬戶，請先在 Accounts 建立。' : 'Owner account not found. Please create it in Accounts first.' };
-      }
+    if (formData.contributedBy && !isSplit && !accountIdSet.has(formData.contributedBy)) {
+      return { field: 'contributedBy', message: language === 'zh' ? '資金來源賬戶無效，請重新選擇。' : 'Invalid funded-by account. Please reselect.' };
     }
 
     return null;
@@ -297,7 +369,8 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
     const baseId = Math.random().toString(36).substr(2, 9);
     const amount = Number(formData.amount);
     const transactionsToAdd: Transaction[] = [];
-    const revenueDescription = formData.description.trim() || selectedCategory?.name || formData.categoryId;
+    const revenueDescription = selectedCategory?.name || formData.description.trim() || formData.categoryId;
+    const finalTransactionNoteText = transactionNoteText.trim();
     const resetReceiptNumber = `REC-${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`;
 
     const resetForm = () => {
@@ -317,16 +390,17 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
           fromAccountId: '',
           toAccountId: '',
           fundedBy: 'Bank',
-          contributedBy: prev.type === TransactionType.REVENUE ? '' : Owner.OWNER_A,
+          contributedBy: Owner.OWNER_A,
           notes: '',
           receiptNumber: resetReceiptNumber
         };
       });
       setImageUrl(undefined);
+      setTransactionNoteText('');
     };
 
-    if (formData.type === TransactionType.ADD_RMB || formData.type === TransactionType.CASH_OUT) {
-      const isInvestment = formData.type === TransactionType.ADD_RMB;
+    if (formData.type === TransactionType.OWNER_INVESTMENT || formData.type === TransactionType.OWNER_WITHDRAWAL) {
+      const isInvestment = formData.type === TransactionType.OWNER_INVESTMENT;
       
       // For owner transactions, contributedBy must be the owner account ID
       const ownerAccountId = isInvestment ? formData.fromAccountId : formData.toAccountId;
@@ -346,7 +420,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
         notes: formData.notes || '',
         imageUrl: imageUrl
       });
-      onAdd(transactionsToAdd);
+      onAdd(transactionsToAdd, finalTransactionNoteText);
 
       resetForm();
       return;
@@ -354,30 +428,13 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
 
     // Notes are manual user input only.
     let finalNotes = formData.notes || '';
-    if (!isRevenue && formData.fundedBy !== 'Bank') {
-      // Find the owner's account ID
-      const ownerAccount = normalizedAccounts.find(acc => acc.name === formData.fundedBy);
-      const ownerAccountId = ownerAccount?.id || (formData.fundedBy === 'User 1' ? Owner.OWNER_A : Owner.OWNER_B);
-
-      // Create equivalent "owner investment" transfer
-      transactionsToAdd.push({
-        id: Math.random().toString(36).substr(2, 9),
-        type: TransactionType.TRANSFER,
-        categoryId: 'owner_investment',
-        amount: amount,
-        description: `Owner Investment from ${formData.fundedBy} (Funded Expense)`,
-        date: formData.date,
-        receiptNumber: `REC-${Date.now().toString().slice(-6)}`,
-        contributedBy: ownerAccountId,
-        fromAccountId: ownerAccountId,
-        toAccountId: formData.fromAccountId || undefined,
-        notes: `Equivalent transaction for expense ${formData.description}`
-      });
-    }
 
     const { fromAccountId, toAccountId, ...rest } = formData;
-    const finalFromAccountId = (formData.type === TransactionType.EXPENSE || formData.type === TransactionType.WITHDRAWAL) ? fromAccountId : undefined;
+    const finalFromAccountId = (formData.type === TransactionType.EXPENSE || formData.type === TransactionType.WITHDRAWAL)
+      ? fromAccountId
+      : undefined;
     const finalToAccountId = (formData.type === TransactionType.REVENUE || formData.type === TransactionType.STARTUP) ? toAccountId : undefined;
+    const expenseDescription = selectedCategory?.name || formData.description.trim() || formData.categoryId;
 
     if (isSplit) {
       if (isRevenue) {
@@ -388,8 +445,8 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
           notes: finalNotes,
           id: `${baseId}-A`,
           amount: amount / 2,
-          contributedBy: '',
-          description: revenueDescription,
+          contributedBy: Owner.OWNER_A,
+          description: `[SPLIT] ${revenueDescription}`,
           imageUrl: imageUrl
         });
         transactionsToAdd.push({
@@ -399,8 +456,8 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
           notes: finalNotes,
           id: `${baseId}-B`,
           amount: amount / 2,
-          contributedBy: '',
-          description: revenueDescription,
+          contributedBy: Owner.OWNER_B,
+          description: `[SPLIT] ${revenueDescription}`,
           imageUrl: imageUrl
         });
       } else {
@@ -412,7 +469,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
           id: `${baseId}-A`,
           amount: amount / 2,
           contributedBy: Owner.OWNER_A,
-          description: `[SPLIT] ${formData.description}`,
+          description: `[SPLIT] ${isExpense ? expenseDescription : formData.description}`,
           imageUrl: imageUrl
         });
         transactionsToAdd.push({
@@ -423,11 +480,11 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
           id: `${baseId}-B`,
           amount: amount / 2,
           contributedBy: Owner.OWNER_B,
-          description: `[SPLIT] ${formData.description}`,
+          description: `[SPLIT] ${isExpense ? expenseDescription : formData.description}`,
           imageUrl: imageUrl
         });
       }
-      onAdd(transactionsToAdd);
+      onAdd(transactionsToAdd, finalTransactionNoteText);
     } else {
       transactionsToAdd.push({
         ...rest,
@@ -437,11 +494,11 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
         notes: finalNotes,
         amount: amount,
         date: formData.date || new Date().toISOString().substring(0, 10),
-        description: isRevenue ? revenueDescription : formData.description,
-        contributedBy: isRevenue ? '' : formData.contributedBy,
+        description: isRevenue ? revenueDescription : (isExpense ? expenseDescription : formData.description),
+        contributedBy: formData.contributedBy,
         imageUrl: imageUrl
       });
-      onAdd(transactionsToAdd);
+      onAdd(transactionsToAdd, finalTransactionNoteText);
     }
 
     resetForm();
@@ -509,8 +566,6 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
               <select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value as TransactionType})} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none appearance-none dark:bg-slate-800 dark:border-white/5 dark:text-white">
                 <option value={TransactionType.REVENUE}>{t.revenue}</option>
                 <option value={TransactionType.EXPENSE}>{t.expense}</option>
-                <option value={TransactionType.ADD_RMB}>{language === 'zh' ? 'Owner Investment / 入金' : 'Owner Investment'}</option>
-                <option value={TransactionType.CASH_OUT}>{language === 'zh' ? 'Owner Withdrawal / 攞錢' : 'Owner Withdrawal'}</option>
               </select>
             </div>
             <div>
@@ -520,6 +575,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
               <select 
                 value={formData.customerId} 
                 onChange={e => setFormData({...formData, customerId: e.target.value})} 
+                disabled={isOwnerInvestment || isOwnerWithdrawal}
                 className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none appearance-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
               >
                 <option value="">{language === 'zh' ? '無 (None)' : 'None'}</option>
@@ -534,14 +590,14 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
             <div>
               <div className="h-7 mb-2 flex items-center">
                 <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest">
-                  {formData.type === TransactionType.ADD_RMB 
+                  {formData.type === TransactionType.OWNER_INVESTMENT 
                     ? (language === 'zh' ? '出賬賬戶 (業主)' : 'From Account (Owner)')
                     : (language === 'zh' ? '出賬賬戶' : 'From Account')}
                 </label>
               </div>
               <select 
                 value={formData.fromAccountId} 
-                onChange={e => setFormData({...formData, fromAccountId: e.target.value})} 
+                onChange={e => setFormData({...formData, fromAccountId: e.target.value, ...(isOwnerInvestment ? { contributedBy: e.target.value } : {})})} 
                 data-validation-field="fromAccountId"
                 disabled={isRevenue}
                 className={getFieldClasses('fromAccountId', 'w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none appearance-none dark:bg-slate-800 dark:border-white/5 dark:text-white')}
@@ -549,7 +605,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
                 <option value="">{language === 'zh' ? '選擇賬戶' : 'Select Account'}</option>
                 {fromAccounts.map(a => (
                   <option key={a.id} value={a.id}>
-                    {a.id} - {a.name} ({a.type.replace('_', ' ')})
+                    {a.id} - {a.name} ({String(a.type || '').replace('_', ' ') || 'other'})
                   </option>
                 ))}
               </select>
@@ -560,15 +616,16 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
             <div>
               <div className="h-7 mb-2 flex items-center">
                 <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest">
-                  {formData.type === TransactionType.CASH_OUT
+                  {formData.type === TransactionType.OWNER_WITHDRAWAL
                     ? (language === 'zh' ? '入賬賬戶 (業主)' : 'To Account (Owner)')
                     : (language === 'zh' ? '入賬賬戶' : 'To Account')}
                 </label>
               </div>
               <select 
                 value={formData.toAccountId} 
-                onChange={e => setFormData({...formData, toAccountId: e.target.value})} 
+                onChange={e => setFormData({...formData, toAccountId: e.target.value, ...(isOwnerWithdrawal ? { contributedBy: e.target.value } : {})})} 
                 data-validation-field="toAccountId"
+                disabled={isExpense}
                 className={getFieldClasses('toAccountId', 'w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none appearance-none dark:bg-slate-800 dark:border-white/5 dark:text-white')}
               >
                 <option value="">{language === 'zh' ? '選擇賬戶' : 'Select Account'}</option>
@@ -587,20 +644,21 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
           <div className="grid grid-cols-2 gap-6">
             <div>
               <div className="h-7 mb-2 flex items-center">
-                <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest">{language === 'zh' ? '資金來源' : 'Funded By'}</label>
+                <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest">{language === 'zh' ? '資金來源 (contributed_by)' : 'Funded By (contributed_by)'}</label>
               </div>
-              <select 
-                value={formData.fundedBy} 
-                onChange={e => setFormData({...formData, fundedBy: e.target.value})} 
-                data-validation-field="fundedBy"
-                disabled={isRevenue}
-                className={getFieldClasses('fundedBy', 'w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none appearance-none dark:bg-slate-800 dark:border-white/5 dark:text-white')}
+              <select
+                value={formData.contributedBy}
+                onChange={e => setFormData({...formData, contributedBy: e.target.value})}
+                data-validation-field="contributedBy"
+                disabled={isSplit || isOwnerInvestment || isOwnerWithdrawal}
+                className={getFieldClasses('contributedBy', 'w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none appearance-none dark:bg-slate-800 dark:border-white/5 dark:text-white')}
               >
-                <option value="Bank">{language === 'zh' ? '銀行賬戶' : 'Bank Account'}</option>
-                <option value="User 1">User 1</option>
-                <option value="User 2">User 2</option>
+                <option value="">{language === 'zh' ? '選擇賬戶 ID' : 'Select Account ID'}</option>
+                {normalizedAccounts.map(a => (
+                  <option key={a.id} value={a.id}>{a.id}</option>
+                ))}
               </select>
-              {validationIssue?.field === 'fundedBy' && (
+              {validationIssue?.field === 'contributedBy' && (
                 <p className="mt-2 text-[11px] font-bold text-rose-600 dark:text-rose-400">{validationIssue.message}</p>
               )}
             </div>
@@ -616,14 +674,20 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
                 </button>
               </div>
               <div className="relative">
-                {isRevenue ? (
+                {isRevenue || isExpense ? (
                   <select
                     value={formData.categoryId}
-                    onChange={e => setFormData({...formData, categoryId: e.target.value})}
+                    onChange={e => {
+                      const nextCategoryId = e.target.value;
+                      setFormData({
+                        ...formData,
+                        categoryId: nextCategoryId,
+                      });
+                    }}
                     data-validation-field="categoryId"
                     className={getFieldClasses('categoryId', 'w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none appearance-none dark:bg-slate-800 dark:border-white/5 dark:text-white')}
                   >
-                    <option value="">{language === 'zh' ? '選擇收入分類' : 'Select revenue category'}</option>
+                    <option value="">{isRevenue ? (language === 'zh' ? '選擇收入分類' : 'Select revenue category') : (language === 'zh' ? '選擇支出分類' : 'Select expense category')}</option>
                     {filteredCategories.map(cat => (
                       <option key={cat.id} value={cat.id}>{cat.name}</option>
                     ))}
@@ -635,6 +699,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
                       value={formData.categoryId} 
                       onChange={e => setFormData({...formData, categoryId: e.target.value})} 
                       data-validation-field="categoryId"
+                      disabled={isOwnerInvestment || isOwnerWithdrawal}
                       className={getFieldClasses('categoryId', 'w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white')}
                       placeholder={language === 'zh' ? '選擇或輸入分類' : 'Select or type category'}
                     />
@@ -712,16 +777,18 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
             <div className="flex justify-between items-center mb-2">
               <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest">{t.contributedBy}</label>
               <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-3 justify-end">
-                  <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-tight">{t.split5050}</span>
-                  <input 
-                    type="checkbox" 
-                    checked={isSplit} 
-                    onChange={() => setIsSplit(!isSplit)}
-                    className="w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 transition-all cursor-pointer"
-                  />
-                </div>
-                {(formData.type === TransactionType.EXPENSE || formData.type === TransactionType.ADD_RMB) && (
+                {!(isOwnerInvestment || isOwnerWithdrawal) && (
+                  <div className="flex items-center gap-3 justify-end">
+                    <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-tight">{t.split5050}</span>
+                    <input 
+                      type="checkbox" 
+                      checked={isSplit} 
+                      onChange={() => setIsSplit(!isSplit)}
+                      className="w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 transition-all cursor-pointer"
+                    />
+                  </div>
+                )}
+                {(formData.type === TransactionType.EXPENSE || formData.type === TransactionType.OWNER_INVESTMENT) && (
                   <div className="flex items-center gap-3 justify-end">
                     <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-tight">{t.initialInvestment}</span>
                     <input 
@@ -735,10 +802,10 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
               </div>
             </div>
             
-            {isRevenue ? (
-              <div className="bg-blue-50 border border-blue-100 p-4 rounded-2xl text-center dark:bg-blue-900/10 dark:border-blue-900/20">
-                <p className="text-[10px] font-black text-blue-600 uppercase tracking-widest dark:text-blue-400">
-                  {language === 'zh' ? 'Revenue 不寫 contributed_by。' : 'Revenue entries leave contributed_by blank.'}
+            {(isOwnerInvestment || isOwnerWithdrawal) ? (
+              <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl dark:bg-slate-800 dark:border-white/5">
+                <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest dark:text-slate-400">
+                  {language === 'zh' ? `自動設定: ${formData.contributedBy || '(請先選擇出賬賬戶)'}` : `Auto-assigned: ${formData.contributedBy || '(Select from account first)'}`}
                 </p>
               </div>
             ) : !isSplit ? (
@@ -755,26 +822,19 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
           </div>
 
           <div>
-            <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest mb-2">{t.description}</label>
-            {isRevenue ? (
-              <div className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 dark:bg-slate-800 dark:border-white/5 dark:text-white">
-                {selectedCategory?.name || (language === 'zh' ? '請先選擇收入分類' : 'Select a revenue category first')}
-              </div>
-            ) : (
-              <textarea 
-                rows={3} value={formData.description}
-                onChange={e => setFormData({...formData, description: e.target.value})}
-                className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
-                placeholder={language === 'zh' ? 'e.g. 洗車液採購...' : 'e.g. washing fluid purchase...'}
-              />
-            )}
-          </div>
-
-          <div>
-            <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest mb-2">{t.transactionNotes} {language === 'zh' ? '(自由輸入)' : '(Manual entry)'}</label>
-            <textarea 
-              rows={4} value={formData.notes || ''}
+            <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest mb-2">{language === 'zh' ? 'Note (備註)' : 'Note'}</label>
+            <textarea
+              rows={3} value={formData.notes || ''}
               onChange={e => setFormData({...formData, notes: e.target.value})}
+              className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
+              placeholder={language === 'zh' ? '自由輸入備註...' : 'Enter note freely...'}
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest mb-2">{language === 'zh' ? 'Transaction Notes (自由輸入)' : 'Transaction Notes'}</label>
+            <textarea
+              rows={4} value={transactionNoteText}
+              onChange={e => setTransactionNoteText(e.target.value)}
               className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
               placeholder={language === 'zh' ? '手動輸入備註，不會自動帶入分類...' : 'Enter notes manually. This will not auto-copy category...'}
             />

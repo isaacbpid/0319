@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import { FinancialSummary, Transaction, TransactionType, CategoryItem } from '../types';
@@ -20,17 +19,68 @@ const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'
 const Dashboard: React.FC<DashboardProps> = ({ summary, transactions, categories, language, onNavigateStartup, onNavigateForecast, onNavigateNotes, dueRemindersCount }) => {
   const t = translations[language];
   
-  const categoryData = React.useMemo(() => {
+
+
+  // Month/year selector state
+  const now = new Date();
+  const [selectedYear, setSelectedYear] = React.useState<number | 'all'>(now.getFullYear());
+  const [selectedMonth, setSelectedMonth] = React.useState<number | 'all'>(now.getMonth() + 1); // 1-based
+
+  // Get available years and months from transactions
+  const availableMonths = React.useMemo(() => {
+    const monthsSet = new Set<string>();
+    transactions.forEach(tr => {
+      if (tr.date) monthsSet.add(tr.date.substring(0, 7));
+    });
+    const arr = Array.from(monthsSet).sort().reverse();
+    return arr.map(m => {
+      const [year, month] = m.split('-');
+      return { year: Number(year), month: Number(month) };
+    });
+  }, [transactions]);
+
+  // Filtered transactions for selected month/year
+  const filteredTransactions = React.useMemo(() => {
+    return transactions.filter(tr => {
+      if (!tr.date) return false;
+      const [year, month] = tr.date.split('-');
+      const trYear = Number(year);
+      const trMonth = Number(month);
+
+      const yearMatch = selectedYear === 'all' || trYear === selectedYear;
+      const monthMatch = selectedMonth === 'all' || trMonth === selectedMonth;
+
+      return yearMatch && monthMatch;
+    });
+  }, [transactions, selectedYear, selectedMonth]);
+
+  // Revenue category data (filtered)
+  const revenueCategoryData = React.useMemo(() => {
     const data: Record<string, number> = {};
-    transactions
+    filteredTransactions
+      .filter(tr => tr.type === TransactionType.REVENUE)
+      .forEach(tr => {
+        const category = categories.find(c => c.id === tr.categoryId);
+        const name = category ? category.name : tr.categoryId;
+        data[name] = (data[name] || 0) + tr.amount;
+      });
+    const total = Object.values(data).reduce((sum, v) => sum + v, 0);
+    return Object.entries(data).map(([name, value]) => ({ name, value, percent: total ? (value / total) * 100 : 0 }));
+  }, [filteredTransactions, categories]);
+
+  // Expense category data (filtered)
+  const expenseCategoryData = React.useMemo(() => {
+    const data: Record<string, number> = {};
+    filteredTransactions
       .filter(tr => tr.type === TransactionType.EXPENSE || tr.type === TransactionType.STARTUP)
       .forEach(tr => {
         const category = categories.find(c => c.id === tr.categoryId);
         const name = category ? category.name : tr.categoryId;
         data[name] = (data[name] || 0) + tr.amount;
       });
-    return Object.entries(data).map(([name, value]) => ({ name, value }));
-  }, [transactions, categories]);
+    const total = Object.values(data).reduce((sum, v) => sum + v, 0);
+    return Object.entries(data).map(([name, value]) => ({ name, value, percent: total ? (value / total) * 100 : 0 }));
+  }, [filteredTransactions, categories]);
 
   const monthlyProfitData = React.useMemo(() => {
     const months: Record<string, { revenue: number, expense: number, startup: number }> = {};
@@ -48,9 +98,18 @@ const Dashboard: React.FC<DashboardProps> = ({ summary, transactions, categories
       if (months[m]) {
         if (tr.type === TransactionType.REVENUE) {
           months[m].revenue += tr.amount;
-        } else if (tr.type === TransactionType.STARTUP) {
+        } else if (
+          tr.type === TransactionType.OWNER_INVESTMENT ||
+          (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')
+        ) {
           months[m].startup += tr.amount;
-        } else {
+        } else if (
+          tr.type === TransactionType.OWNER_WITHDRAWAL ||
+          tr.type === TransactionType.WITHDRAWAL ||
+          (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal')
+        ) {
+          months[m].startup -= tr.amount;
+        } else if (tr.type === TransactionType.EXPENSE) {
           months[m].expense += tr.amount;
         }
       }
@@ -103,11 +162,18 @@ const Dashboard: React.FC<DashboardProps> = ({ summary, transactions, categories
           secondary={language === 'zh' ? '所有存取款總和' : 'Sum of all deposits/withdrawals'}
         />
         <SummaryCard 
-          label={language === 'zh' ? '個人餘額' : 'Personal Balance'} 
-          value={summary.personalBalance} 
+          label={language === 'zh' ? '個人餘額（用戶1）' : 'Personal Balance (User 1)'} 
+          value={summary.ownerA.settlement} 
           icon="fa-user" 
           color="violet" 
-          secondary={language === 'zh' ? '個人權益餘額' : 'Personal equity balance'}
+          secondary={language === 'zh' ? '用戶1權益餘額' : 'User 1 equity balance'}
+        />
+        <SummaryCard 
+          label={language === 'zh' ? '個人餘額（用戶2）' : 'Personal Balance (User 2)'} 
+          value={summary.ownerB.settlement} 
+          icon="fa-user" 
+          color="orange" 
+          secondary={language === 'zh' ? '用戶2權益餘額' : 'User 2 equity balance'}
         />
         <SummaryCard 
           label={t.totalProfit} 
@@ -134,73 +200,162 @@ const Dashboard: React.FC<DashboardProps> = ({ summary, transactions, categories
         />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white p-4 rounded-[24px] shadow-sm border border-slate-100 dark:bg-slate-900 dark:border-white/10">
-          <h3 className="text-xs font-black uppercase tracking-[0.15em] mb-4 text-slate-800 dark:text-white flex items-center">
-            <i className="fas fa-chart-bar text-blue-500 mr-2"></i>
-            {t.revenueVsExpense}
-          </h3>
-          <div className="h-[300px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={monthlyProfitData}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" className="opacity-20" />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} style={{ fontSize: '10px', fontWeight: 'bold' }} tick={{ fill: 'currentColor' }} className="text-slate-400 dark:text-white" />
-                <YAxis 
-                  axisLine={false} 
-                  tickLine={false} 
-                  style={{ fontSize: '10px', fontWeight: 'bold' }} 
-                  tick={{ fill: 'currentColor' }} 
-                  className="text-slate-400 dark:text-white" 
-                  tickFormatter={(val) => `¥${val >= 1000 ? (val/1000).toFixed(0) + 'k' : val}`}
-                />
-                <Tooltip 
-                  contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.3)', backgroundColor: '#1e293b', color: '#fff' }}
-                  itemStyle={{ fontWeight: 'bold', color: '#fff' }}
-                  formatter={(value: number) => [formatCurrency(value), '']}
-                />
-                <Legend iconType="circle" wrapperStyle={{ fontSize: '11px', fontWeight: 'bold', textTransform: 'uppercase', paddingTop: '10px' }} />
-                <Bar name={t.revenue} dataKey="revenue" fill="#3b82f6" radius={[6, 6, 0, 0]} />
-                <Bar name={t.expense} dataKey="expense" fill="#f43f5e" radius={[6, 6, 0, 0]} />
-                <Bar name={t.startupCosts} dataKey="startup" fill="#f59e0b" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
+      {/* Month/Year Selector */}
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <label className="text-xs font-bold text-black dark:text-white">Month:</label>
+        <select
+          className="rounded-lg border px-2 py-1 text-xs font-bold text-black dark:text-white bg-white dark:bg-slate-800"
+          value={selectedMonth}
+          onChange={e => {
+            const nextVal = e.target.value;
+            setSelectedMonth(nextVal === 'all' ? 'all' : Number(nextVal));
+          }}
+        >
+          <option value="all">All</option>
+          {Array.from(new Set(availableMonths.map(m => m.month))).sort((a, b) => a - b).map(month => (
+            <option key={month} value={month}>{month.toString().padStart(2, '0')}</option>
+          ))}
+        </select>
+        <label className="text-xs font-bold text-black dark:text-white ml-2">Year:</label>
+        <select
+          className="rounded-lg border px-2 py-1 text-xs font-bold text-black dark:text-white bg-white dark:bg-slate-800"
+          value={selectedYear}
+          onChange={e => {
+            const nextVal = e.target.value;
+            setSelectedYear(nextVal === 'all' ? 'all' : Number(nextVal));
+          }}
+        >
+          <option value="all">All</option>
+          {Array.from(new Set(availableMonths.map(m => m.year))).sort((a, b) => b - a).map(year => (
+            <option key={year} value={year}>{year}</option>
+          ))}
+        </select>
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
 
-        <div className="bg-white p-4 rounded-[24px] shadow-sm border border-slate-100 dark:bg-slate-900 dark:border-white/10">
+        {/* Revenue Pie Chart */}
+        <div className="bg-white p-4 rounded-[24px] shadow-sm border border-slate-100 dark:bg-slate-900 dark:border-white/10 h-full">
           <h3 className="text-xs font-black uppercase tracking-[0.15em] mb-4 text-slate-800 dark:text-white flex items-center">
-            <i className="fas fa-chart-pie text-emerald-500 mr-2"></i>
-            {t.expenseBreakdown}
+            <i className="fas fa-chart-pie text-blue-500 mr-2"></i>
+            Revenue Breakdown
           </h3>
-          <div className="h-[300px] flex items-center justify-center">
-            {categoryData.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
+          <div className="h-[300px] flex flex-col items-center justify-center">
+            {revenueCategoryData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
                 <PieChart>
                   <Pie
-                    data={categoryData}
+                    data={revenueCategoryData}
                     cx="50%"
-                    cy="40%"
-                    innerRadius={60}
-                    outerRadius={90}
-                    paddingAngle={8}
+                    cy="50%"
+                    innerRadius={0}
+                    outerRadius={100}
+                    paddingAngle={2}
                     dataKey="value"
+                    label={({ percent }) => `${percent.toFixed(1)}%`}
+                    labelLine={false}
                   >
-                    {categoryData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                    {revenueCategoryData.map((entry, index) => (
+                      <Cell key={`cell-rev-${index}`} fill={COLORS[index % COLORS.length]} />
                     ))}
                   </Pie>
                   <Tooltip 
-                    formatter={(value: number) => formatCurrency(value)}
+                    formatter={(value: number, name: string, props: any) => [`${formatCurrency(value)} (${props.payload.percent.toFixed(1)}%)`, name]}
                     contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.3)', backgroundColor: '#1e293b', color: '#fff' }}
                     itemStyle={{ color: '#fff', fontWeight: 'bold' }}
                   />
-                  <Legend layout="horizontal" verticalAlign="bottom" iconType="circle" wrapperStyle={{ fontSize: '10px', fontWeight: 'bold' }} />
+                  <Legend layout="horizontal" verticalAlign="bottom" align="center" iconType="circle" wrapperStyle={{ fontSize: '10px', fontWeight: 'bold', marginTop: 12 }} />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="text-slate-400 italic text-sm font-medium">{t.noRevenueData || 'No revenue data'}</div>
+            )}
+          </div>
+        </div>
+
+        {/* Expense Pie Chart */}
+        <div className="bg-white p-4 rounded-[24px] shadow-sm border border-slate-100 dark:bg-slate-900 dark:border-white/10 h-full">
+          <h3 className="text-xs font-black uppercase tracking-[0.15em] mb-4 text-slate-800 dark:text-white flex items-center">
+            <i className="fas fa-chart-pie text-emerald-500 mr-2"></i>
+            Expense Breakdown
+          </h3>
+          <div className="h-[300px] flex flex-col items-center justify-center">
+            {expenseCategoryData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <PieChart>
+                  <Pie
+                    data={expenseCategoryData}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={0}
+                    outerRadius={100}
+                    paddingAngle={2}
+                    dataKey="value"
+                    label={({ percent }) => `${percent.toFixed(1)}%`}
+                    labelLine={false}
+                  >
+                    {expenseCategoryData.map((entry, index) => (
+                      <Cell key={`cell-exp-${index}`} fill={COLORS[index % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip 
+                    formatter={(value: number, name: string, props: any) => [`${formatCurrency(value)} (${props.payload.percent.toFixed(1)}%)`, name]}
+                    contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.3)', backgroundColor: '#1e293b', color: '#fff' }}
+                    itemStyle={{ color: '#fff', fontWeight: 'bold' }}
+                  />
+                  <Legend layout="horizontal" verticalAlign="bottom" align="center" iconType="circle" wrapperStyle={{ fontSize: '10px', fontWeight: 'bold', marginTop: 12 }} />
                 </PieChart>
               </ResponsiveContainer>
             ) : (
               <div className="text-slate-400 italic text-sm font-medium">{t.noExpenseData}</div>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Flow Plot */}
+      <div className="bg-white p-4 rounded-[24px] shadow-sm border border-slate-100 dark:bg-slate-900 dark:border-white/10 mt-6">
+        <h3 className="text-xs font-black uppercase tracking-[0.15em] mb-4 text-slate-800 dark:text-white flex items-center">
+          <i className="fas fa-chart-bar text-blue-500 mr-2"></i>
+          {t.revenueVsExpense}
+        </h3>
+        <div className="h-[300px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={monthlyProfitData}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" className="opacity-20" />
+              <XAxis
+                dataKey="name"
+                axisLine={false}
+                tickLine={false}
+                interval={0}
+                minTickGap={8}
+                style={{ fontSize: '10px', fontWeight: 'bold' }}
+                tick={{ fill: '#ef4444' }}
+                tickFormatter={(val) => {
+                  if (!val) return '';
+                  const parts = val.split('-');
+                  if (parts.length < 2) return val;
+                  return `${parts[1]}/${parts[0].slice(2)}`;
+                }}
+              />
+              <YAxis
+                axisLine={false}
+                tickLine={false}
+                style={{ fontSize: '10px', fontWeight: 'bold' }}
+                tick={{ fill: 'currentColor' }}
+                className="text-slate-400 dark:text-white"
+                tickFormatter={(val) => `¥${val >= 1000 ? (val / 1000).toFixed(0) + 'k' : val}`}
+              />
+              <Tooltip
+                contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.3)', backgroundColor: '#1e293b', color: '#fff' }}
+                itemStyle={{ fontWeight: 'bold', color: '#fff' }}
+                formatter={(value: number, name: string) => [`${name.toUpperCase()}: ${formatCurrency(value)}`]}
+              />
+              <Legend iconType="circle" wrapperStyle={{ fontSize: '11px', fontWeight: 'bold', textTransform: 'uppercase', paddingTop: '10px' }} />
+              <Bar name={t.revenue} dataKey="revenue" fill="#3b82f6" radius={[6, 6, 0, 0]} />
+              <Bar name={t.expense} dataKey="expense" fill="#f43f5e" radius={[6, 6, 0, 0]} />
+              <Bar name={t.startupCosts} dataKey="startup" fill="#f59e0b" radius={[6, 6, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
         </div>
       </div>
     </div>
@@ -213,6 +368,7 @@ const SummaryCard = ({ label, value, icon, color, secondary, onClick }: any) => 
     emerald: 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400',
     amber: 'bg-amber-50 text-amber-600 dark:bg-amber-900/20 dark:text-amber-400',
     violet: 'bg-violet-50 text-violet-600 dark:bg-violet-900/20 dark:text-violet-400',
+    orange: 'bg-orange-50 text-orange-600 dark:bg-orange-900/20 dark:text-orange-400',
   };
 
   return (

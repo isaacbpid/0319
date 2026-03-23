@@ -595,13 +595,28 @@ const App: React.FC = () => {
     loadData(true, config);
   };
 
-  const addTransaction = async (transaction: Transaction | Transaction[]) => {
+  const addTransaction = async (transaction: Transaction | Transaction[], transactionNoteText?: string) => {
     setIsSyncing(true);
     const now = new Date().toISOString();
     const newItems = Array.isArray(transaction) 
       ? transaction.map(tr => ({ ...tr, updatedAt: now }))
       : [{ ...transaction, updatedAt: now }];
-    const generatedNotes = buildTransactionNotes(newItems);
+    const transactionNoteContent = (transactionNoteText || '').trim();
+    const manualTransactionNotes: Note[] = transactionNoteContent
+      ? [{
+          id: crypto.randomUUID(),
+          content: [
+            `[${now}] Transaction Notes`,
+            `Transaction IDs: ${newItems.map(item => item.id).join(', ')}`,
+            '',
+            transactionNoteContent
+          ].join('\n'),
+          createdBy: 'system',
+          createdAt: now,
+          updatedAt: now
+        }]
+      : [];
+    const generatedNotes = manualTransactionNotes;
     
     try {
       if (cloudConfig) {
@@ -1031,30 +1046,43 @@ const App: React.FC = () => {
   };
 
   const summary: FinancialSummary = useMemo(() => {
-    // New logic: owner investments and withdrawals are TRANSFER type with specific category IDs
-    // addRmb represents ALL money injected by owners into the business
+    // Helper to get startup cost for a partner - strict matching on contributedBy
+    const getStartupCost = (ownerName: string) => {
+      // Only match transactions where contributedBy exactly equals ownerName
+      const investments = transactions.filter(tr => {
+        const isStartupInvestment = (tr.type === TransactionType.OWNER_INVESTMENT || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) && tr.isInitialInvestment === true;
+        const isOwnersTransaction = tr.contributedBy === ownerName;
+        return isStartupInvestment && isOwnersTransaction;
+      });
+      const withdrawals = transactions.filter(tr => {
+        const isStartupWithdrawal = (tr.type === TransactionType.OWNER_WITHDRAWAL || tr.type === TransactionType.WITHDRAWAL || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal')) && tr.isInitialInvestment === true;
+        const isOwnersTransaction = tr.contributedBy === ownerName;
+        return isStartupWithdrawal && isOwnersTransaction;
+      });
+      const investmentTotal = investments.reduce((sum, tr) => sum + tr.amount, 0);
+      const withdrawalTotal = withdrawals.reduce((sum, tr) => sum + tr.amount, 0);
+      const result = investmentTotal - withdrawalTotal;
+      return result;
+    };
+
+    // Startup cost: only sum owner_investment - owner_withdrawal where isInitialInvestment is true, for each partner
+    const startupInvestments = transactions.filter(tr => (tr.type === TransactionType.OWNER_INVESTMENT || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) && tr.isInitialInvestment === true);
+    const startupWithdrawals = transactions.filter(tr => (tr.type === TransactionType.OWNER_WITHDRAWAL || tr.type === TransactionType.WITHDRAWAL || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal')) && tr.isInitialInvestment === true);
+    const totalStartup = startupInvestments.reduce((sum, tr) => sum + tr.amount, 0) - startupWithdrawals.reduce((sum, tr) => sum + tr.amount, 0);
+
+    // All money injected by owners into the business
     const addRmb = transactions
-      .filter(tr => (tr.type === TransactionType.ADD_RMB) || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment'))
+      .filter(tr => (tr.type === TransactionType.OWNER_INVESTMENT) || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment'))
       .reduce((sum, tr) => sum + tr.amount, 0);
-    
-    // cashOut represents ALL money taken out by owners from the business
+
+    // All money taken out by owners from the business
     const cashOut = transactions
-      .filter(tr => (tr.type === TransactionType.CASH_OUT) || (tr.type === TransactionType.WITHDRAWAL) || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal'))
+      .filter(tr => (tr.type === TransactionType.OWNER_WITHDRAWAL) || (tr.type === TransactionType.WITHDRAWAL) || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal'))
       .reduce((sum, tr) => sum + tr.amount, 0);
-    
+
     const revenue = transactions.filter(tr => tr.type === TransactionType.REVENUE).reduce((sum, tr) => sum + tr.amount, 0);
     const expenses = transactions.filter(tr => tr.type === TransactionType.EXPENSE).reduce((sum, tr) => sum + tr.amount, 0);
-    
-    // Total startup costs (for ROI calculation) - only includes transactions marked as initial investment
-    // For older records without the flag, we fallback to STARTUP type
-    const totalStartup = transactions
-      .filter(tr => {
-        if (tr.isInitialInvestment !== undefined) return tr.isInitialInvestment;
-        // Fallback for old records: STARTUP type is the primary indicator
-        return tr.type === TransactionType.STARTUP;
-      })
-      .reduce((sum, tr) => sum + tr.amount, 0);
-    
+
     // Total withdrawals (same as cashOut but used in balance calculation)
     const withdrawals = cashOut;
 
@@ -1075,7 +1103,7 @@ const App: React.FC = () => {
       const ownerTransactions = transactions.filter(tr => tr.contributedBy === ownerId || tr.contributedBy === ownerName);
       
       const deposits = ownerTransactions
-        .filter(tr => tr.type === TransactionType.STARTUP || tr.type === TransactionType.ADD_RMB || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment'))
+        .filter(tr => tr.type === TransactionType.OWNER_INVESTMENT || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment'))
         .reduce((sum, tr) => sum + tr.amount, 0);
       
       const revenueHandled = ownerTransactions
@@ -1087,12 +1115,12 @@ const App: React.FC = () => {
         .reduce((sum, tr) => sum + tr.amount, 0);
       
       const ownerWithdrawals = ownerTransactions
-        .filter(tr => tr.type === TransactionType.WITHDRAWAL || tr.type === TransactionType.CASH_OUT || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal'))
+        .filter(tr => tr.type === TransactionType.WITHDRAWAL || tr.type === TransactionType.OWNER_WITHDRAWAL || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal'))
         .reduce((sum, tr) => sum + tr.amount, 0);
       
-      // Equity calculation: (Total Injected + 50% Profit) - (Total Withdrawn)
-      // Note: Profit is split 50/50 regardless of who handled the revenue/expense
-      const currentEquity = (deposits + (netProfit / 2)) - ownerWithdrawals;
+      // Equity calculation per partner: investment - withdrawals + own net profit.
+      const individualNetProfit = revenueHandled - expensesHandled;
+      const currentEquity = deposits - ownerWithdrawals + individualNetProfit;
       
       return { 
         invested: deposits, 
@@ -1113,8 +1141,8 @@ const App: React.FC = () => {
       netProfit,
       // ROI is calculated against startup costs
       roiPercentage: totalStartup > 0 ? (revenue / totalStartup) * 100 : 0,
-      ownerA: getPartnerStats('User 1'), 
-      ownerB: getPartnerStats('User 2')
+      ownerA: { ...getPartnerStats('User 1'), startupCosts: getStartupCost('User 1') },
+      ownerB: { ...getPartnerStats('User 2'), startupCosts: getStartupCost('User 2') }
     };
   }, [transactions, accounts]);
 
@@ -1581,6 +1609,7 @@ const App: React.FC = () => {
                 <TransactionList 
                   transactions={transactions} 
                   accounts={accounts}
+                  categories={categories}
                   onDelete={deleteTransaction} 
                   onUpdate={updateTransaction} 
                   onBulkUpdate={bulkUpdateTransactions} 

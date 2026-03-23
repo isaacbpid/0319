@@ -1,11 +1,12 @@
 
 import React, { useState, useRef, useMemo } from 'react';
-import { Transaction, TransactionType, Owner, Category, Account } from '../types';
+import { Transaction, TransactionType, Owner, Account, CategoryItem } from '../types';
 import { translations } from '../translations';
 
 interface TransactionListProps {
   transactions: Transaction[];
   accounts: Account[];
+  categories: CategoryItem[];
   onDelete: (id: string) => void;
   onUpdate: (tr: Transaction) => void;
   onBulkUpdate: (items: Transaction[]) => void;
@@ -20,7 +21,7 @@ interface TransactionListProps {
 type SizeFilter = 'ALL' | 'SMALL' | 'MEDIUM' | 'LARGE';
 type DateFilter = 'ALL' | 'TODAY' | 'WEEK' | 'MONTH' | 'CUSTOM';
 
-const TransactionList: React.FC<TransactionListProps> = ({ transactions, accounts, onDelete, onUpdate, onBulkUpdate, onExportExcel, onExportJSON, language, isSyncing, isReadOnly, filter }) => {
+const TransactionList: React.FC<TransactionListProps> = ({ transactions, accounts, categories, onDelete, onUpdate, onBulkUpdate, onExportExcel, onExportJSON, language, isSyncing, isReadOnly, filter }) => {
   const t = translations[language];
   const normalizedAccounts = useMemo(() => {
     const cleaned = (accounts || [])
@@ -61,6 +62,17 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectionMode, setSelectionMode] = useState(false);
   const longPressTimer = useRef<NodeJS.Timeout | null>(null);
+
+  const editCategories = useMemo(() => {
+    if (!editingTr) return categories;
+    if (editingTr.type === TransactionType.EXPENSE) {
+      return categories.filter(category => category.type === TransactionType.EXPENSE);
+    }
+    if (editingTr.type === TransactionType.REVENUE) {
+      return categories.filter(category => category.type === TransactionType.REVENUE);
+    }
+    return categories;
+  }, [categories, editingTr]);
 
   const toggleSelection = (id: string) => {
     const newSelected = new Set(selectedIds);
@@ -255,12 +267,20 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
   const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (editingTr) {
+      const isExpenseEdit = editingTr.type === TransactionType.EXPENSE;
+      const selectedCategory = categories.find(category => category.id === editingTr.categoryId);
+      const normalizedEditedTransaction: Transaction = {
+        ...editingTr,
+        toAccountId: isExpenseEdit ? undefined : editingTr.toAccountId,
+        description: isExpenseEdit ? (selectedCategory?.name || editingTr.description) : editingTr.description
+      };
+
       const tr = editingTr as any;
       if (tr.isGrouped && tr.originalIds) {
         // Update all parts of the grouped transaction
         const amountPerPart = tr.amount / tr.originalIds.length;
         const updatedItems = tr.originalIds.map((id: string) => ({
-          ...editingTr,
+          ...normalizedEditedTransaction,
           id,
           amount: amountPerPart,
           isGrouped: undefined,
@@ -268,7 +288,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
         }));
         await onBulkUpdate(updatedItems);
       } else {
-        await onUpdate(editingTr);
+        await onUpdate(normalizedEditedTransaction);
       }
       setEditingTr(null);
     }
@@ -567,8 +587,8 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                     </div>
                   </td>
                   <td className="px-6 py-5 whitespace-nowrap text-sm"><span className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest ${tr.contributedBy === Owner.OWNER_A ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400' : tr.contributedBy === Owner.OWNER_B ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400' : 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/20 dark:text-indigo-400'}`}>{tr.contributedBy}</span></td>
-                  <td className={`px-6 py-5 whitespace-nowrap text-right font-black text-sm tracking-tight ${tr.type === TransactionType.REVENUE ? 'text-emerald-600 dark:text-emerald-400' : tr.type === TransactionType.STARTUP ? 'text-blue-600 dark:text-blue-400' : 'text-slate-800 dark:text-white'}`}>
-                    {(tr.type === TransactionType.REVENUE || tr.type === TransactionType.STARTUP) ? '+' : '-'} ¥{tr.amount.toLocaleString()}
+                  <td className={`px-6 py-5 whitespace-nowrap text-right font-black text-sm tracking-tight ${tr.type === TransactionType.REVENUE ? 'text-emerald-600 dark:text-emerald-400' : (tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? 'text-blue-600 dark:text-blue-400' : 'text-slate-800 dark:text-white'}`}>
+                    {(tr.type === TransactionType.REVENUE || tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? '+' : '-'} ¥{tr.amount.toLocaleString()}
                   </td>
                   <td className="px-6 py-5 text-right">
                     <div className="flex items-center justify-end gap-1">
@@ -651,8 +671,8 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                     </div>
                   </div>
                 </div>
-                <div className={`text-sm font-black tracking-tight ${tr.type === TransactionType.REVENUE ? 'text-emerald-600 dark:text-emerald-400' : tr.type === TransactionType.STARTUP ? 'text-blue-600 dark:text-blue-400' : 'text-slate-900 dark:text-white'}`}>
-                  {(tr.type === TransactionType.REVENUE || tr.type === TransactionType.STARTUP) ? '+' : '-'} ¥{tr.amount.toLocaleString()}
+                <div className={`text-sm font-black tracking-tight ${tr.type === TransactionType.REVENUE ? 'text-emerald-600 dark:text-emerald-400' : (tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? 'text-blue-600 dark:text-blue-400' : 'text-slate-900 dark:text-white'}`}>
+                  {(tr.type === TransactionType.REVENUE || tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? '+' : '-'} ¥{tr.amount.toLocaleString()}
                 </div>
               </div>
               
@@ -702,10 +722,9 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
               <button 
                 onClick={confirmDelete} 
                 disabled={isSyncing}
-                className={`flex-1 py-4 bg-rose-600 hover:bg-rose-700 text-white rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-lg shadow-rose-600/20 active:scale-95 flex items-center justify-center gap-2 ${isSyncing ? 'opacity-70' : ''}`}
+                className={`flex-1 py-4 bg-rose-700 hover:bg-rose-800 text-white dark:text-white border border-rose-800 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-lg shadow-rose-700/30 active:scale-95 flex items-center justify-center gap-2 ${isSyncing ? 'opacity-70' : ''}`}
               >
-                {isSyncing && <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>}
-                {t.confirmDelete}
+                TEST BUTTON
               </button>
             </div>
           </div>
@@ -724,7 +743,19 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.type}</label>
-                    <select value={editingTr.type} onChange={e => setEditingTr({...editingTr, type: e.target.value as TransactionType})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white">
+                    <select value={editingTr.type} onChange={e => {
+                      const nextType = e.target.value as TransactionType;
+                      const nextCategory = categories.find(category => category.type === nextType);
+                      setEditingTr({
+                        ...editingTr,
+                        type: nextType,
+                        categoryId: nextCategory?.id || editingTr.categoryId,
+                        description: nextType === TransactionType.EXPENSE
+                          ? (nextCategory?.name || editingTr.description)
+                          : editingTr.description,
+                        toAccountId: nextType === TransactionType.EXPENSE ? undefined : editingTr.toAccountId
+                      });
+                    }} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white">
                       <option value={TransactionType.REVENUE}>{t.revenue}</option>
                       <option value={TransactionType.EXPENSE}>{t.expense}</option>
                       <option value={TransactionType.STARTUP}>{t.startupCosts}</option>
@@ -733,9 +764,19 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                   </div>
                   <div>
                     <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.category}</label>
-                    <select value={editingTr.categoryId} onChange={e => setEditingTr({...editingTr, categoryId: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white">
-                      {Object.values(Category).map(cat => (
-                        <option key={cat} value={cat}>{cat}</option>
+                    <select value={editingTr.categoryId} onChange={e => {
+                      const nextCategoryId = e.target.value;
+                      const nextCategory = editCategories.find(category => category.id === nextCategoryId);
+                      setEditingTr({
+                        ...editingTr,
+                        categoryId: nextCategoryId,
+                        description: editingTr.type === TransactionType.EXPENSE
+                          ? (nextCategory?.name || editingTr.description)
+                          : editingTr.description
+                      });
+                    }} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white">
+                      {editCategories.map(category => (
+                        <option key={category.id} value={category.id}>{category.name}</option>
                       ))}
                     </select>
                   </div>
@@ -778,13 +819,19 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
 
                 <div>
                   <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.description}</label>
-                  <div className="relative">
-                    <textarea value={editingTr.description} onChange={e => setEditingTr({...editingTr, description: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" rows={2}></textarea>
-                  </div>
+                  {editingTr.type === TransactionType.EXPENSE ? (
+                    <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:bg-slate-800 dark:border-white/5 dark:text-white">
+                      {editingTr.description || (language === 'zh' ? '請先選擇支出分類' : 'Select an expense category first')}
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <textarea value={editingTr.description} onChange={e => setEditingTr({...editingTr, description: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" rows={2}></textarea>
+                    </div>
+                  )}
                </div>
 
                <div>
-                  <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.transactionNotes} {language === 'zh' ? '(手動輸入)' : '(Manual entry)'}</label>
+                  <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{language === 'zh' ? 'Transaction Notes (手動輸入)' : 'Transaction Notes'}</label>
                   <div className="relative">
                     <textarea value={editingTr.notes || ''} onChange={e => setEditingTr({...editingTr, notes: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" rows={3} placeholder={language === 'zh' ? '手動輸入備註，不會自動帶入分類...' : 'Enter notes manually. This will not auto-copy category...'}></textarea>
                   </div>
@@ -809,6 +856,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                     <select 
                       value={editingTr.toAccountId || ''} 
                       onChange={e => setEditingTr({...editingTr, toAccountId: e.target.value || undefined})} 
+                      disabled={editingTr.type === TransactionType.EXPENSE}
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
                     >
                       <option value="">None</option>
@@ -817,6 +865,20 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                       ))}
                     </select>
                   </div>
+               </div>
+
+               <div>
+                  <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{language === 'zh' ? '資金來源 (contributed_by)' : 'Funded By (contributed_by)'}</label>
+                  <select
+                    value={editingTr.contributedBy || ''}
+                    onChange={e => setEditingTr({...editingTr, contributedBy: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
+                  >
+                    <option value="">{language === 'zh' ? '選擇賬戶 ID' : 'Select Account ID'}</option>
+                    {normalizedAccounts.map(a => (
+                      <option key={a.id} value={a.id}>{a.id}</option>
+                    ))}
+                  </select>
                </div>
 
                <button 
@@ -848,7 +910,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
             <div className="flex gap-3">
               <button 
                 onClick={async () => { await onDelete(deletingId); setDeletingId(null); }}
-                className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-black py-4 rounded-2xl shadow-xl shadow-rose-600/20 transition-all active:scale-95 text-xs uppercase tracking-widest"
+                className="flex-1 bg-rose-700 hover:bg-rose-800 text-white dark:text-white border border-rose-800 font-black py-4 rounded-2xl shadow-xl shadow-rose-700/30 transition-all active:scale-95 text-xs uppercase tracking-widest"
               >
                 {t.delete}
               </button>
@@ -879,7 +941,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
             <div className="flex gap-3">
               <button 
                 onClick={handleBulkDelete}
-                className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-black py-4 rounded-2xl shadow-xl shadow-rose-600/20 transition-all active:scale-95 text-xs uppercase tracking-widest"
+                className="flex-1 bg-rose-700 hover:bg-rose-800 text-white dark:text-white border border-rose-800 font-black py-4 rounded-2xl shadow-xl shadow-rose-700/30 transition-all active:scale-95 text-xs uppercase tracking-widest"
               >
                 {t.delete}
               </button>

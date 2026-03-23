@@ -1,6 +1,6 @@
 
 import { createClient } from '@supabase/supabase-js';
-import { Transaction, TransactionType, CloudConfig, AuditAction, AuditLog, Note, CategoryItem, Customer, BankBalanceTransaction, Account } from '../types';
+import { Transaction, TransactionType, CloudConfig, AuditAction, AuditLog, Note, CategoryItem, Customer, BankBalanceTransaction, Account, AccountType } from '../types';
 
 let supabase: any = null;
 
@@ -34,6 +34,24 @@ type SyncedTransactionRow = {
 };
 
 const VALID_TRANSACTION_TYPES = new Set(Object.values(TransactionType));
+const VALID_ACCOUNT_TYPES = new Set(Object.values(AccountType));
+
+const normalizeAccountType = (value: unknown): AccountType => {
+  if (typeof value !== 'string') return AccountType.OTHER;
+
+  const trimmed = value.trim();
+  if (!trimmed) return AccountType.OTHER;
+
+  const lowered = trimmed.toLowerCase();
+  // Legacy alias support: map Owner to partner_personal.
+  if (lowered === 'owner') {
+    return AccountType.PARTNER_PERSONAL;
+  }
+
+  return VALID_ACCOUNT_TYPES.has(lowered as AccountType)
+    ? (lowered as AccountType)
+    : AccountType.OTHER;
+};
 
 const normalizeNullableText = (value?: string | null): string | null => {
   if (typeof value !== 'string') return null;
@@ -51,7 +69,12 @@ const normalizeOccurredAt = (value?: string): string | null => {
   if (!raw) return null;
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-    const d = new Date(`${raw}T00:00:00.000Z`);
+    // Combine chosen date with the current wall-clock time so occurred_at
+    // carries a real timestamp rather than midnight UTC.
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const withTime = `${raw}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+    const d = new Date(withTime);
     return Number.isNaN(d.getTime()) ? null : d.toISOString();
   }
 
@@ -106,7 +129,7 @@ const normalizeTransactionForSync = (transaction: Transaction): { row?: SyncedTr
     errors.push('Missing category_id');
   }
 
-  if (!contributedBy && type !== TransactionType.REVENUE) {
+  if (!contributedBy) {
     errors.push('Missing contributed_by');
   }
 
@@ -867,7 +890,7 @@ export const fetchRemoteAccounts = async (): Promise<{ data: Account[] | null; e
     const mappedData = (data || []).map((a: any) => ({
       id: a.id,
       name: a.name,
-      type: a.type,
+      type: normalizeAccountType(a.type),
       createdAt: a.created_at
     }));
 
@@ -885,7 +908,7 @@ export const syncRemoteAccounts = async (accounts: Account[]): Promise<{ success
     const cleanAccounts = accounts.map(a => ({
       id: a.id,
       name: a.name,
-      type: a.type,
+      type: normalizeAccountType(a.type),
       created_at: a.createdAt || new Date().toISOString()
     }));
 

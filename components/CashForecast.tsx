@@ -1,4 +1,3 @@
-
 import React, { useMemo, useState } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { Transaction, TransactionType, FinancialSummary, Category, Owner, Account } from '../types';
@@ -30,8 +29,60 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
     amount: '',
     contributedBy: Owner.OWNER_A,
     description: '',
-    receiptNumber: `BANK-${Date.now().toString().slice(-6)}`
+    receiptNumber: `BANK-${Date.now().toString().slice(-6)}`,
+    isInitialInvestment: false,
+    fromAccountId: '',
+    toAccountId: ''
   });
+
+  // Quick Fund account sources — same normalisation + fallback as TransactionForm
+  const normalizedAccounts = useMemo(() => {
+    const cleaned = (accounts || [])
+      .filter(a => a && typeof a.id === 'string' && a.id.trim())
+      .map(a => ({
+        ...a,
+        id: a.id.trim(),
+        name: typeof a.name === 'string' && a.name.trim() ? a.name.trim() : a.id.trim(),
+        type: typeof a.type === 'string' ? a.type : ''
+      }));
+    if (cleaned.length > 0) return cleaned;
+    return [
+      { id: 'Bank', name: 'Bank', type: 'company_bank', createdAt: '' },
+      { id: 'Cash', name: 'Cash', type: 'cash', createdAt: '' },
+      { id: 'User 1', name: 'User 1', type: 'partner_personal', createdAt: '' },
+      { id: 'User 2', name: 'User 2', type: 'partner_personal', createdAt: '' }
+    ];
+  }, [accounts]);
+
+  const partnerAccounts = useMemo(() => normalizedAccounts.filter(a => a.type === 'partner_personal'), [normalizedAccounts]);
+  const nonOwnerAccounts = useMemo(() => normalizedAccounts.filter(a => a.type !== 'partner_personal'), [normalizedAccounts]);
+
+  // For owner investment/withdrawal: set account fields appropriately
+  React.useEffect(() => {
+    if (!showQuickAdjust) return;
+    if (adjustData.type === TransactionType.STARTUP) {
+      // Investment: From = partner, To = Cash (default)
+      const partnerAcc = partnerAccounts.find(a => a.name === adjustData.contributedBy);
+      const cashAccount = nonOwnerAccounts.find(a => a.type === 'cash');
+      const defaultTo = cashAccount?.id || nonOwnerAccounts[0]?.id || '';
+      setAdjustData(adjust => ({
+        ...adjust,
+        fromAccountId: partnerAcc?.id || '',
+        toAccountId: defaultTo
+      }));
+    } else if (adjustData.type === TransactionType.WITHDRAWAL) {
+      // Withdrawal: From = Cash (default non-owner), To = partner
+      const cashAccount = nonOwnerAccounts.find(a => a.type === 'cash');
+      const defaultFrom = cashAccount?.id || nonOwnerAccounts[0]?.id || '';
+      const partnerAcc = partnerAccounts.find(a => a.name === adjustData.contributedBy);
+      setAdjustData(adjust => ({
+        ...adjust,
+        fromAccountId: defaultFrom,
+        toAccountId: partnerAcc?.id || ''
+      }));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showQuickAdjust, adjustData.type, adjustData.contributedBy]);
 
   const getPartnerBalance = (owner: Owner) => {
     return owner === Owner.OWNER_A ? summary.ownerA.settlement : summary.ownerB.settlement;
@@ -84,7 +135,10 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
     }
 
     sortedTr.forEach(tr => {
-      const impact = (tr.type === TransactionType.REVENUE || tr.type === TransactionType.STARTUP) ? tr.amount : -tr.amount;
+      // Money IN: Owner investment, Revenue, Startup
+      // Money OUT: Expenses, Owner withdrawal
+      const isMoneyIn = tr.type === TransactionType.REVENUE || tr.type === TransactionType.STARTUP || tr.type === TransactionType.OWNER_INVESTMENT || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment');
+      const impact = isMoneyIn ? tr.amount : -tr.amount;
       runningBalance += impact;
       data.push({
         name: tr.date,
@@ -94,34 +148,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
     });
 
     // Add projection if we have data
-    if (data.length > 1) {
-      const monthlyStats: Record<string, { revenue: number, expense: number }> = {};
-      transactions.forEach(tr => {
-        const month = tr.date.substring(0, 7);
-        if (!monthlyStats[month]) monthlyStats[month] = { revenue: 0, expense: 0 };
-        if (tr.type === TransactionType.REVENUE) monthlyStats[month].revenue += tr.amount;
-        else if (tr.type === TransactionType.EXPENSE) monthlyStats[month].expense += tr.amount;
-      });
-
-      const months = Object.values(monthlyStats);
-      const avgMonthlyNet = months.length > 0 
-        ? months.reduce((sum, m) => sum + (m.revenue - m.expense), 0) / months.length
-        : 0;
-
-      let currentProjection = runningBalance;
-      const lastDate = new Date(data[data.length - 1].name);
-      
-      for (let i = 1; i <= 3; i++) {
-        const d = new Date(lastDate.getFullYear(), lastDate.getMonth() + i, 1);
-        const monthStr = `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}`;
-        currentProjection += avgMonthlyNet;
-        data.push({
-          name: monthStr,
-          balance: currentProjection,
-          type: 'projection'
-        });
-      }
-    }
+    // Remove projection: do not add future months
 
     return data;
   }, [transactions]);
@@ -173,7 +200,8 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
           contributedBy: ownerAId,
           fromAccountId: adjustData.type === TransactionType.STARTUP ? ownerAId : businessAccount?.id,
           toAccountId: adjustData.type === TransactionType.STARTUP ? businessAccount?.id : ownerAId,
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
+          isInitialInvestment: adjustData.isInitialInvestment
         },
         {
           id: `${baseId}-B`,
@@ -186,7 +214,8 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
           contributedBy: ownerBId,
           fromAccountId: adjustData.type === TransactionType.STARTUP ? ownerBId : businessAccount?.id,
           toAccountId: adjustData.type === TransactionType.STARTUP ? businessAccount?.id : ownerBId,
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
+          isInitialInvestment: adjustData.isInitialInvestment
         }
       ];
       await onAdd(splitItems);
@@ -211,9 +240,14 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
         amount: amountNum,
         description,
         contributedBy: ownerId,
-        fromAccountId: adjustData.type === TransactionType.STARTUP ? ownerId : businessAccount?.id,
-        toAccountId: adjustData.type === TransactionType.STARTUP ? businessAccount?.id : ownerId,
-        updatedAt: new Date().toISOString()
+        fromAccountId: adjustData.type === TransactionType.STARTUP
+          ? (adjustData.fromAccountId || ownerId)
+          : (adjustData.fromAccountId || businessAccount?.id),
+        toAccountId: adjustData.type === TransactionType.STARTUP
+          ? (adjustData.toAccountId || businessAccount?.id)
+          : (adjustData.toAccountId || ownerId),
+        updatedAt: new Date().toISOString(),
+        isInitialInvestment: adjustData.isInitialInvestment
       };
 
       await onAdd(newTransaction);
@@ -236,7 +270,10 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
       amount: '',
       contributedBy: Owner.OWNER_A,
       description: '',
-      receiptNumber: `BANK-${Date.now().toString().slice(-6)}`
+      receiptNumber: `BANK-${Date.now().toString().slice(-6)}`,
+      isInitialInvestment: false,
+      fromAccountId: '',
+      toAccountId: ''
     });
   };
 
@@ -284,6 +321,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
         </div>
         <i className="fas fa-university absolute -right-6 -bottom-6 text-[12rem] text-white/5 transform -rotate-12"></i>
       </div>
+
 
       {/* Partner Ledger Section */}
       <div className="bg-[#0f172a] p-8 rounded-[40px] shadow-2xl text-white relative overflow-hidden">
@@ -333,7 +371,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
             <div className="grid grid-cols-2 gap-4 border-t border-white/5 pt-6">
               <div>
                 <p className="text-slate-400 dark:text-slate-300 text-[9px] font-black uppercase tracking-widest mb-1">{t.partnerStartupCosts}</p>
-                <h4 className="text-sm font-bold text-white">¥ {summary.ownerA.invested.toLocaleString()}</h4>
+                <h4 className="text-sm font-bold text-white">¥ {summary.ownerA.startupCosts.toLocaleString()}</h4>
               </div>
               <div className="text-right">
                 <p className="text-slate-400 dark:text-slate-300 text-[9px] font-black uppercase tracking-widest mb-1">
@@ -365,7 +403,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
             <div className="grid grid-cols-2 gap-4 border-t border-white/5 pt-6">
               <div>
                 <p className="text-slate-400 dark:text-slate-300 text-[9px] font-black uppercase tracking-widest mb-1">{t.partnerStartupCosts}</p>
-                <h4 className="text-sm font-bold text-white">¥ {summary.ownerB.invested.toLocaleString()}</h4>
+                <h4 className="text-sm font-bold text-white">¥ {summary.ownerB.startupCosts.toLocaleString()}</h4>
               </div>
               <div className="text-right">
                 <p className="text-slate-400 dark:text-slate-300 text-[9px] font-black uppercase tracking-widest mb-1">
@@ -408,8 +446,11 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
                 style={{ fontSize: '10px', fontWeight: 'bold' }} 
                 tick={{ fill: '#ffffff' }}
                 tickFormatter={(val) => {
+                  // Show as mm/yy
+                  if (!val) return '';
                   const parts = val.split('-');
-                  return language === 'zh' ? `${parts[1]}月` : parts[1];
+                  if (parts.length < 2) return val;
+                  return `${parts[1]}/${parts[0].slice(2)}`;
                 }}
               />
               <YAxis 
@@ -417,7 +458,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
                 tickLine={false} 
                 style={{ fontSize: '10px', fontWeight: 'bold' }} 
                 tick={{ fill: '#ffffff' }} 
-                tickFormatter={(val) => `¥${val >= 1000 ? (val/1000).toFixed(0) + 'k' : val}`}
+                tickFormatter={(val) => `¥${val.toLocaleString()}`}
                 domain={['auto', 'auto']} 
               />
               <Tooltip 
@@ -545,37 +586,83 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
               </div>
 
               <div>
-                <div className="flex justify-between items-center mb-1">
-                  <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase">{t.contributedBy}</label>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-tight">{t.split5050}</span>
-                    <button 
-                      type="button" 
-                      onClick={() => setIsSplit(!isSplit)} 
-                      className={`w-11 h-6 rounded-full transition-colors relative ${isSplit ? 'bg-blue-600' : 'bg-slate-200 dark:bg-slate-700'}`}
-                    >
-                      <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform shadow-sm ${isSplit ? 'translate-x-5' : 'translate-x-0'}`}></div>
-                    </button>
+                <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.contributedBy}</label>
+                <div className="flex gap-2 mb-2">
+                  <button type="button" onClick={() => setAdjustData({...adjustData, contributedBy: Owner.OWNER_A})} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase border transition-all ${adjustData.contributedBy === Owner.OWNER_A ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-500/20' : 'bg-white text-slate-500 border-slate-200 hover:border-blue-200 dark:bg-slate-800 dark:border-white/5 dark:text-slate-400'}`}>User 1</button>
+                  <button type="button" onClick={() => setAdjustData({...adjustData, contributedBy: Owner.OWNER_B})} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase border transition-all ${adjustData.contributedBy === Owner.OWNER_B ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-500/20' : 'bg-white text-slate-500 border-slate-200 hover:border-blue-200 dark:bg-slate-800 dark:border-white/5 dark:text-slate-400'}`}>User 2</button>
+                </div>
+                <div className="grid grid-cols-2 gap-2 mb-2">
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">From Account</label>
+                    {adjustData.type === TransactionType.STARTUP ? (
+                      <select
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
+                        value={adjustData.fromAccountId}
+                        disabled
+                        required
+                      >
+                        <option value="">Select...</option>
+                        {partnerAccounts.map(acc => (
+                          <option key={acc.id} value={acc.id}>{acc.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <select
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
+                        value={adjustData.fromAccountId}
+                        onChange={e => setAdjustData({ ...adjustData, fromAccountId: e.target.value })}
+                        required
+                        disabled={isSyncing || isReadOnly}
+                      >
+                        <option value="">Select...</option>
+                        {nonOwnerAccounts.map(acc => (
+                          <option key={acc.id} value={acc.id}>{acc.name}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">To Account</label>
+                    {adjustData.type === TransactionType.STARTUP ? (
+                      <select
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
+                        value={adjustData.toAccountId}
+                        onChange={e => setAdjustData({ ...adjustData, toAccountId: e.target.value })}
+                        required
+                        disabled={isSyncing || isReadOnly}
+                      >
+                        <option value="">Select...</option>
+                        {nonOwnerAccounts.map(acc => (
+                          <option key={acc.id} value={acc.id}>{acc.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-xs font-bold text-slate-900 dark:bg-slate-800 dark:border-white/5 dark:text-white"
+                        value={partnerAccounts.find(a => a.id === adjustData.toAccountId)?.name || ''}
+                        disabled
+                      />
+                    )}
                   </div>
                 </div>
-                
-                {!isSplit ? (
-                  <>
-                    <div className="flex gap-2">
-                      <button type="button" onClick={() => setAdjustData({...adjustData, contributedBy: Owner.OWNER_A})} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase border transition-all ${adjustData.contributedBy === Owner.OWNER_A ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-500/20' : 'bg-white text-slate-500 border-slate-200 hover:border-blue-200 dark:bg-slate-800 dark:border-white/5 dark:text-slate-400'}`}>User 1</button>
-                      <button type="button" onClick={() => setAdjustData({...adjustData, contributedBy: Owner.OWNER_B})} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase border transition-all ${adjustData.contributedBy === Owner.OWNER_B ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-500/20' : 'bg-white text-slate-500 border-slate-200 hover:border-blue-200 dark:bg-slate-800 dark:border-white/5 dark:text-slate-400'}`}>User 2</button>
-                    </div>
-                    <div className="mt-2 text-center">
-                      <p className="text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest">
-                        {t.netPosition}: <span className={`font-black ${currentPartnerBalance >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>¥{currentPartnerBalance.toLocaleString()}</span>
-                      </p>
-                    </div>
-                  </>
-                ) : (
-                  <div className="bg-blue-50 border border-blue-100 p-4 rounded-2xl text-center dark:bg-blue-900/10 dark:border-blue-900/20">
-                    <p className="text-[10px] font-black text-blue-600 uppercase tracking-widest dark:text-blue-400">{t.splitNote}</p>
-                  </div>
-                )}
+                <div className="mt-2 text-center">
+                  <p className="text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest">
+                    {t.netPosition}: <span className={`font-black ${currentPartnerBalance >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>¥{currentPartnerBalance.toLocaleString()}</span>
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 mt-3 mb-2">
+                  <input
+                    id="initial-investment-checkbox"
+                    type="checkbox"
+                    checked={adjustData.isInitialInvestment}
+                    onChange={e => setAdjustData({ ...adjustData, isInitialInvestment: e.target.checked })}
+                    className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 transition-all"
+                    disabled={isSyncing || isReadOnly}
+                  />
+                  <label htmlFor="initial-investment-checkbox" className="text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase cursor-pointer select-none">
+                    Initial Investment
+                  </label>
+                </div>
               </div>
 
               {isOverdrawing && (
@@ -597,7 +684,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
                 />
               </div>
 
-              <button type="submit" disabled={isSyncing || isReadOnly} className={`w-full bg-blue-600 text-white font-black py-4 rounded-2xl text-xs uppercase tracking-widest shadow-lg active:scale-95 transition-all dark:shadow-none flex items-center justify-center gap-2 ${isSyncing || isReadOnly ? 'opacity-70' : ''}`}>
+              <button type="submit" disabled={isSyncing || isReadOnly} className={`w-full bg-blue-600 text-white font-black py-4 rounded-2xl text-xs uppercase tracking-widest shadow-lg active:scale-95 transition-all dark:shadow-none flex items-center justify-center gap-2 ${isSyncing || isReadOnly ? 'opacity-70' : ''}`}> 
                 {isSyncing && <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>}
                 {t.action}
               </button>
@@ -617,9 +704,9 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
             </div>
             <div className="flex gap-3">
               <button onClick={() => setDeletingId(null)} disabled={isSyncing} className="flex-1 py-4 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-widest transition-all active:scale-95 dark:bg-white/5 dark:text-slate-400 dark:hover:bg-white/10">{t.cancel}</button>
-              <button onClick={handleDeleteConfirm} disabled={isSyncing} className={`flex-1 py-4 bg-rose-600 hover:bg-rose-700 text-white rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-lg shadow-rose-600/20 active:scale-95 flex items-center justify-center gap-2 ${isSyncing ? 'opacity-70' : ''}`}>
+              <button onClick={handleDeleteConfirm} disabled={isSyncing} className={`flex-1 py-4 bg-rose-700 hover:bg-rose-800 text-white dark:text-white border border-rose-800 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-lg shadow-rose-700/30 active:scale-95 flex items-center justify-center gap-2 ${isSyncing ? 'opacity-70' : ''}`}>
                 {isSyncing && <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>}
-                {t.confirmDelete}
+                <span style={{ color: 'yellow', fontWeight: 'bold', textShadow: '0 1px 2px #0008' }}>{t.confirmDelete}</span>
               </button>
             </div>
           </div>

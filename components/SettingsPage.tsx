@@ -384,7 +384,7 @@ $$ language sql stable;`;
                     setShowClearConfirm(false);
                     setShowSecretMenu(false);
                   }} 
-                  className="flex-1 py-4 bg-rose-600 hover:bg-rose-700 text-white rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-lg shadow-rose-600/20 active:scale-95"
+                  className="flex-1 py-4 bg-rose-700 hover:bg-rose-800 text-white dark:text-white border border-rose-800 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-lg shadow-rose-700/30 active:scale-95"
                 >
                   {language === 'zh' ? '確定清除' : 'Confirm Clear'}
                 </button>

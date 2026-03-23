@@ -4,8 +4,8 @@ export enum TransactionType {
   EXPENSE = 'EXPENSE',
   STARTUP = 'STARTUP',
   WITHDRAWAL = 'WITHDRAWAL',
-  ADD_RMB = 'ADD_RMB',
-  CASH_OUT = 'CASH_OUT',
+  OWNER_INVESTMENT = 'ADD_RMB',
+  OWNER_WITHDRAWAL = 'CASH_OUT',
   TRANSFER = 'TRANSFER'
 }
 
@@ -28,8 +28,8 @@ export enum Category {
   
   // Other
   OTHER = '其他 (Other)',
-  ADD_RMB = 'Add RMB',
-  CASH_OUT = 'Cash Out'
+  OWNER_INVESTMENT = 'Add RMB',
+  OWNER_WITHDRAWAL = 'Cash Out'
 }
 
 export enum Owner {
@@ -152,7 +152,7 @@ export interface Partner {
 export interface Account {
   id: string;
   name: string;
-  type: string;
+  type: AccountType;
   createdAt: string;
 }
 
@@ -221,6 +221,7 @@ export interface FinancialSummary {
     expensesHandled: number;
     withdrawals: number;
     settlement: number;
+    startupCosts: number;
   };
   ownerB: {
     invested: number;
@@ -228,6 +229,7 @@ export interface FinancialSummary {
     expensesHandled: number;
     withdrawals: number;
     settlement: number;
+    startupCosts: number;
   };
 }
 

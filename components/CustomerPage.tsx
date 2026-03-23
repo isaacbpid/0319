@@ -324,7 +324,7 @@ const CustomerPage: React.FC<CustomerPageProps> = ({ customers, transactions, on
                   setSelectedCustomerId(null);
                   setDeleteConfirm(null);
                 }}
-                className="flex-1 py-4 bg-rose-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-rose-600/20"
+                className="flex-1 py-4 bg-rose-700 hover:bg-rose-800 text-white dark:text-white border border-rose-800 rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-rose-700/30"
               >
                 {language === 'zh' ? '刪除' : 'Delete'}
               </button>
