@@ -1,18 +1,19 @@
 
 import React, { useState, useMemo } from 'react';
-import { Customer, Transaction, TransactionType } from '../types';
+import { Customer, Transaction, TransactionType, CategoryItem } from '../types';
 import { translations } from '../translations';
 
 interface CustomerPageProps {
   customers: Customer[];
   transactions: Transaction[];
+  categories: CategoryItem[];
   onUpdateCustomer: (customer: Customer) => void;
   onDeleteCustomer: (id: string) => void;
   language: 'zh' | 'en';
   isReadOnly?: boolean;
 }
 
-const CustomerPage: React.FC<CustomerPageProps> = ({ customers, transactions, onUpdateCustomer, onDeleteCustomer, language, isReadOnly }) => {
+const CustomerPage: React.FC<CustomerPageProps> = ({ customers, transactions, categories, onUpdateCustomer, onDeleteCustomer, language, isReadOnly }) => {
   const t = translations[language];
   const [search, setSearch] = useState('');
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
@@ -224,7 +225,9 @@ const CustomerPage: React.FC<CustomerPageProps> = ({ customers, transactions, on
                               <i className={`fas ${tr.type === TransactionType.REVENUE ? 'fa-arrow-up' : 'fa-arrow-down'}`}></i>
                             </div>
                             <div>
-                              <p className="text-xs font-black text-slate-900 dark:text-white">{tr.categoryId}</p>
+                              <p className="text-xs font-black text-slate-900 dark:text-white">
+                                {tr.categoryId}, {categories.find(c => c.id === tr.categoryId)?.name || 'Unknown'}
+                              </p>
                               <p className="text-[10px] font-bold text-slate-400">{tr.date}</p>
                             </div>
                           </div>

@@ -1,5 +1,11 @@
 
 import React, { useState, useRef, useMemo } from 'react';
+// Sort directions
+const SORTS = {
+  ASC: 'asc',
+  DESC: 'desc',
+};
+
 import { Transaction, TransactionType, Owner, Account, CategoryItem } from '../types';
 import { translations } from '../translations';
 
@@ -49,6 +55,8 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
   };
 
   const [search, setSearch] = useState('');
+  // sort: { column: string, direction: 'asc' | 'desc' }
+  const [sort, setSort] = useState<{ column: string; direction: 'asc' | 'desc' }>({ column: 'date', direction: SORTS.DESC });
   const [typeFilter, setTypeFilter] = useState<'ALL' | TransactionType>('ALL');
   const [sizeFilter, setSizeFilter] = useState<SizeFilter>('ALL');
   const [dateFilter, setDateFilter] = useState<DateFilter>('ALL');
@@ -226,19 +234,16 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
       groups[key].push(tr);
     });
 
-    return Object.values(groups).map(group => {
+    let grouped = Object.values(groups).map(group => {
       if (group.length === 1) return group[0];
-      
       const first = group[0];
       const totalAmount = group.reduce((sum, item) => sum + item.amount, 0);
-      
       // Determine display owner
       let displayOwner = first.contributedBy as string;
       const owners = new Set(group.map(g => g.contributedBy));
       if (owners.size > 1) {
         displayOwner = "User 1 & User 2";
       }
-
       return {
         ...first,
         amount: totalAmount,
@@ -247,7 +252,28 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
         originalIds: group.map(g => g.id)
       };
     });
-  }, [filtered]);
+
+    // Sorting logic
+    if (sort.column) {
+      grouped = grouped.slice().sort((a, b) => {
+        let aVal = a[sort.column];
+        let bVal = b[sort.column];
+        // Special handling for date and amount
+        if (sort.column === 'date') {
+          aVal = new Date(aVal).getTime();
+          bVal = new Date(bVal).getTime();
+        }
+        if (sort.column === 'amount') {
+          aVal = Number(aVal);
+          bVal = Number(bVal);
+        }
+        if (aVal < bVal) return sort.direction === SORTS.ASC ? -1 : 1;
+        if (aVal > bVal) return sort.direction === SORTS.ASC ? 1 : -1;
+        return 0;
+      });
+    }
+    return grouped;
+  }, [filtered, sort]);
 
   const confirmDelete = async () => {
     if (deletingId) {
@@ -510,12 +536,30 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
           <table className="w-full text-left">
             <thead className="bg-slate-50/50 text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] border-b border-slate-50 dark:bg-white/5 dark:border-white/5">
               <tr>
-                <th className="px-6 py-5">{t.date}</th>
-                <th className="px-6 py-5">{t.receiptNumber}</th>
-                <th className="px-6 py-5">{t.catDesc}</th>
-                <th className="px-6 py-5">{language === 'zh' ? '賬戶' : 'Account'}</th>
-                <th className="px-6 py-5">{t.contributor}</th>
-                <th className="px-6 py-5 text-right">{t.amount}</th>
+                <th className="px-6 py-5 cursor-pointer select-none" onClick={() => setSort(s => ({ column: 'date', direction: s.column === 'date' && s.direction === SORTS.DESC ? SORTS.ASC : SORTS.DESC }))}>
+                  {t.date}
+                  <span className="ml-1">{sort.column === 'date' ? (sort.direction === SORTS.ASC ? '▲' : '▼') : ''}</span>
+                </th>
+                <th className="px-6 py-5 cursor-pointer select-none" onClick={() => setSort(s => ({ column: 'receiptNumber', direction: s.column === 'receiptNumber' && s.direction === SORTS.DESC ? SORTS.ASC : SORTS.DESC }))}>
+                  {t.receiptNumber}
+                  <span className="ml-1">{sort.column === 'receiptNumber' ? (sort.direction === SORTS.ASC ? '▲' : '▼') : ''}</span>
+                </th>
+                <th className="px-6 py-5 cursor-pointer select-none" onClick={() => setSort(s => ({ column: 'categoryId', direction: s.column === 'categoryId' && s.direction === SORTS.DESC ? SORTS.ASC : SORTS.DESC }))}>
+                  {t.catDesc}
+                  <span className="ml-1">{sort.column === 'categoryId' ? (sort.direction === SORTS.ASC ? '▲' : '▼') : ''}</span>
+                </th>
+                <th className="px-6 py-5 cursor-pointer select-none" onClick={() => setSort(s => ({ column: 'fromAccountId', direction: s.column === 'fromAccountId' && s.direction === SORTS.DESC ? SORTS.ASC : SORTS.DESC }))}>
+                  {language === 'zh' ? '賬戶' : 'Account'}
+                  <span className="ml-1">{sort.column === 'fromAccountId' ? (sort.direction === SORTS.ASC ? '▲' : '▼') : ''}</span>
+                </th>
+                <th className="px-6 py-5 cursor-pointer select-none" onClick={() => setSort(s => ({ column: 'contributedBy', direction: s.column === 'contributedBy' && s.direction === SORTS.DESC ? SORTS.ASC : SORTS.DESC }))}>
+                  {t.contributor}
+                  <span className="ml-1">{sort.column === 'contributedBy' ? (sort.direction === SORTS.ASC ? '▲' : '▼') : ''}</span>
+                </th>
+                <th className="px-6 py-5 text-right cursor-pointer select-none" onClick={() => setSort(s => ({ column: 'amount', direction: s.column === 'amount' && s.direction === SORTS.DESC ? SORTS.ASC : SORTS.DESC }))}>
+                  {t.amount}
+                  <span className="ml-1">{sort.column === 'amount' ? (sort.direction === SORTS.ASC ? '▲' : '▼') : ''}</span>
+                </th>
                 <th className="px-6 py-5"></th>
               </tr>
             </thead>
@@ -542,15 +586,18 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                     </div>
                   </td>
                   <td className="px-6 py-5 whitespace-nowrap">
-                    <div className="flex items-center gap-2">
-                      <span className="px-2.5 py-1 bg-slate-100 text-slate-500 rounded-lg text-[10px] font-black tracking-tight dark:bg-white/10 dark:text-slate-300">{tr.receiptNumber}</span>
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); handleToggleInvestment(tr); }}
-                        className={`w-6 h-6 rounded-full flex items-center justify-center transition-all ${tr.isInitialInvestment ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-400' : 'bg-slate-100 text-slate-300 dark:bg-white/5 dark:text-slate-700'}`}
-                        title={language === 'zh' ? '初始投資' : 'Initial Investment'}
-                      >
-                        <i className="fas fa-rocket text-[10px]"></i>
-                      </button>
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2.5 py-1 bg-slate-100 text-slate-500 rounded-lg text-[10px] font-black tracking-tight dark:bg-white/10 dark:text-slate-300">{tr.receiptNumber}</span>
+                        <button 
+                          onClick={(e) => { e.stopPropagation(); handleToggleInvestment(tr); }}
+                          className={`w-6 h-6 rounded-full flex items-center justify-center transition-all ${tr.isInitialInvestment ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-400' : 'bg-slate-100 text-slate-300 dark:bg-white/5 dark:text-slate-700'}`}
+                          title={language === 'zh' ? '初始投資' : 'Initial Investment'}
+                        >
+                          <i className="fas fa-rocket text-[10px]"></i>
+                        </button>
+                      </div>
+                      <div className="text-xs text-slate-700 dark:text-slate-200 font-bold truncate max-w-[180px] ml-1">{tr.description}</div>
                     </div>
                   </td>
                   <td className="px-6 py-5">
@@ -561,7 +608,13 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                          </button>
                        )}
                        <div>
-                         <div className="text-sm font-black text-slate-800 tracking-tight dark:text-white">{tr.categoryId}</div>
+                         <div className="text-sm font-black text-slate-800 tracking-tight dark:text-white">
+                           {tr.categoryId}
+                           {(() => {
+                             const cat = categories.find(c => c.id === tr.categoryId);
+                             return `, ${cat ? cat.name : 'Unknown'}`;
+                           })()}
+                         </div>
                          <div className="text-[10px] font-bold text-slate-400 dark:text-slate-300 truncate max-w-[200px] mt-0.5">{tr.description}</div>
                        </div>
                     </div>
@@ -742,7 +795,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
             <form onSubmit={handleEditSubmit} className="space-y-4">
                <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.type}</label>
+                    <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{t.type}</label>
                     <select value={editingTr.type} onChange={e => {
                       const nextType = e.target.value as TransactionType;
                       const nextCategory = categories.find(category => category.type === nextType);
@@ -755,7 +808,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                           : editingTr.description,
                         toAccountId: nextType === TransactionType.EXPENSE ? undefined : editingTr.toAccountId
                       });
-                    }} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white">
+                    }} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5">
                       <option value={TransactionType.REVENUE}>{t.revenue}</option>
                       <option value={TransactionType.EXPENSE}>{t.expense}</option>
                       <option value={TransactionType.STARTUP}>{t.startupCosts}</option>
@@ -763,7 +816,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                     </select>
                   </div>
                   <div>
-                    <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.category}</label>
+                    <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{t.category}</label>
                     <select value={editingTr.categoryId} onChange={e => {
                       const nextCategoryId = e.target.value;
                       const nextCategory = editCategories.find(category => category.id === nextCategoryId);
@@ -774,7 +827,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                           ? (nextCategory?.name || editingTr.description)
                           : editingTr.description
                       });
-                    }} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white">
+                    }} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5">
                       {editCategories.map(category => (
                         <option key={category.id} value={category.id}>{category.name}</option>
                       ))}
@@ -784,27 +837,27 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
 
                <div>
                  <div className="flex justify-between items-center mb-1">
-                   <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase">{t.amount} (RMB)</label>
+                   <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase">{t.amount} (RMB)</label>
                    <span className="text-[10px] font-black text-blue-600 animate-pulse dark:text-blue-400">{getAmountUnit(editingTr.amount)}</span>
                  </div>
                  <div className="relative">
                    <input 
                      type="number" value={editingTr.amount} 
                      onChange={e => setEditingTr({...editingTr, amount: Number(e.target.value)})}
-                     className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
+                     className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5"
                    />
                  </div>
                </div>
 
                <div>
-                 <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.date}</label>
-                 <input type="date" value={editingTr.date.slice(0, 10)} onChange={e => setEditingTr({...editingTr, date: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" />
+                 <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{t.date}</label>
+                 <input type="date" value={editingTr.date.slice(0, 10)} onChange={e => setEditingTr({...editingTr, date: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5" />
                </div>
 
                <div>
-                  <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.uploadPhoto}</label>
+                  <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{t.uploadPhoto}</label>
                   <div className="flex items-center gap-4">
-                    <button type="button" onClick={() => editPhotoRef.current?.click()} className="flex-1 py-3 px-4 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-black uppercase text-slate-600 dark:bg-slate-800 dark:border-white/5 dark:text-slate-400">
+                    <button type="button" onClick={() => editPhotoRef.current?.click()} className="flex-1 py-3 px-4 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-black uppercase text-slate-900 dark:text-slate-400 dark:bg-slate-800 dark:border-white/5">
                       {editingTr.imageUrl ? t.changePhoto : t.uploadPhoto}
                     </button>
                     {editingTr.imageUrl && (
@@ -818,32 +871,32 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                </div>
 
                 <div>
-                  <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.description}</label>
+                  <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{t.description}</label>
                   {editingTr.type === TransactionType.EXPENSE ? (
-                    <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:bg-slate-800 dark:border-white/5 dark:text-white">
+                    <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white dark:bg-slate-800 dark:border-white/5">
                       {editingTr.description || (language === 'zh' ? '請先選擇支出分類' : 'Select an expense category first')}
                     </div>
                   ) : (
                     <div className="relative">
-                      <textarea value={editingTr.description} onChange={e => setEditingTr({...editingTr, description: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" rows={2}></textarea>
+                      <textarea value={editingTr.description} onChange={e => setEditingTr({...editingTr, description: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5" rows={2}></textarea>
                     </div>
                   )}
                </div>
 
                <div>
-                  <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{language === 'zh' ? 'Transaction Notes (手動輸入)' : 'Transaction Notes'}</label>
+                  <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{language === 'zh' ? 'Transaction Notes (手動輸入)' : 'Transaction Notes'}</label>
                   <div className="relative">
-                    <textarea value={editingTr.notes || ''} onChange={e => setEditingTr({...editingTr, notes: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white" rows={3} placeholder={language === 'zh' ? '手動輸入備註，不會自動帶入分類...' : 'Enter notes manually. This will not auto-copy category...'}></textarea>
+                    <textarea value={editingTr.notes || ''} onChange={e => setEditingTr({...editingTr, notes: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5" rows={3} placeholder={language === 'zh' ? '手動輸入備註，不會自動帶入分類...' : 'Enter notes manually. This will not auto-copy category...'}></textarea>
                   </div>
                </div>
 
                <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{language === 'zh' ? '出賬賬戶' : 'From Account'}</label>
+                    <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{language === 'zh' ? '出賬賬戶' : 'From Account'}</label>
                     <select 
                       value={editingTr.fromAccountId || ''} 
                       onChange={e => setEditingTr({...editingTr, fromAccountId: e.target.value || undefined})} 
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5"
                     >
                       <option value="">None</option>
                       {normalizedAccounts.map(a => (
@@ -852,12 +905,12 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                     </select>
                   </div>
                   <div>
-                    <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{language === 'zh' ? '入賬賬戶' : 'To Account'}</label>
+                    <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{language === 'zh' ? '入賬賬戶' : 'To Account'}</label>
                     <select 
                       value={editingTr.toAccountId || ''} 
                       onChange={e => setEditingTr({...editingTr, toAccountId: e.target.value || undefined})} 
                       disabled={editingTr.type === TransactionType.EXPENSE}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5"
                     >
                       <option value="">None</option>
                       {normalizedAccounts.map(a => (
@@ -868,11 +921,11 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                </div>
 
                <div>
-                  <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{language === 'zh' ? '資金來源 (contributed_by)' : 'Funded By (contributed_by)'}</label>
+                  <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{language === 'zh' ? '資金來源 (contributed_by)' : 'Funded By (contributed_by)'}</label>
                   <select
                     value={editingTr.contributedBy || ''}
                     onChange={e => setEditingTr({...editingTr, contributedBy: e.target.value})}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5"
                   >
                     <option value="">{language === 'zh' ? '選擇賬戶 ID' : 'Select Account ID'}</option>
                     {normalizedAccounts.map(a => (

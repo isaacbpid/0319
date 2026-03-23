@@ -1337,7 +1337,7 @@ const App: React.FC = () => {
               <button 
                 onClick={pushAllData} 
                 disabled={syncStatus === 'syncing' || !cloudConfig || isReadOnly} 
-                className={`w-full h-9 bg-white dark:bg-white/5 hover:bg-blue-600 hover:text-white border border-slate-200 dark:border-white/10 rounded-xl flex items-center justify-center transition-all group shadow-sm active:scale-95 relative ${isReadOnly ? 'opacity-50 cursor-not-allowed' : ''}`}
+                className={`w-full h-9 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 hover:bg-blue-600 hover:text-white border border-slate-200 dark:border-white/10 rounded-xl flex items-center justify-center transition-all group shadow-sm active:scale-95 relative ${isReadOnly ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
                 <i className="fas fa-sync-alt text-xs mr-2"></i>
                 <span className="text-[10px] font-black uppercase tracking-widest">{t.syncNow}</span>
@@ -1635,6 +1635,7 @@ const App: React.FC = () => {
                 <CustomerPage 
                   customers={customers}
                   transactions={transactions}
+                  categories={categories}
                   onUpdateCustomer={handleUpdateCustomer}
                   onDeleteCustomer={handleDeleteCustomer}
                   language={language}
