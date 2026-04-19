@@ -1,7 +1,9 @@
 import React, { useMemo, useState } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { Transaction, TransactionType, FinancialSummary, Category, Owner, Account } from '../types';
+import { Transaction, TransactionType, FinancialSummary, Category, Owner, Account, AccountType } from '../types';
 import { translations } from '../translations';
+
+const SPLIT_CONTRIBUTOR_LABEL = 'User 1 & User 2';
 
 interface CashForecastProps {
   summary: FinancialSummary;
@@ -18,6 +20,19 @@ interface CashForecastProps {
 
 const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, accounts, language, onAdd, onUpdate, onDelete, isSyncing, isReadOnly, totalInvested }) => {
   const t = translations[language];
+  const ownerDisplayNames: Record<Owner, string> = {
+    [Owner.OWNER_A]: 'Wushi',
+    [Owner.OWNER_B]: 'Maisi'
+  };
+  const ownerInitials: Record<Owner, string> = {
+    [Owner.OWNER_A]: 'W',
+    [Owner.OWNER_B]: 'M'
+  };
+  const getOwnerDisplayName = (value: string) => {
+    if (value === Owner.OWNER_A) return ownerDisplayNames[Owner.OWNER_A];
+    if (value === Owner.OWNER_B) return ownerDisplayNames[Owner.OWNER_B];
+    return value;
+  };
   const [showQuickAdjust, setShowQuickAdjust] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -56,6 +71,23 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
 
   const partnerAccounts = useMemo(() => normalizedAccounts.filter(a => a.type === 'partner_personal'), [normalizedAccounts]);
   const nonOwnerAccounts = useMemo(() => normalizedAccounts.filter(a => a.type !== 'partner_personal'), [normalizedAccounts]);
+
+  const accountBalances = useMemo(() => {
+    const balances: Record<string, number> = {};
+    transactions.forEach(tr => {
+      if (tr.toAccountId) balances[tr.toAccountId] = (balances[tr.toAccountId] || 0) + tr.amount;
+      if (tr.fromAccountId) balances[tr.fromAccountId] = (balances[tr.fromAccountId] || 0) - tr.amount;
+    });
+    return balances;
+  }, [transactions]);
+
+  const bankBalance = useMemo(() => {
+    return normalizedAccounts
+      .filter(a => a.type === 'company_bank')
+      .reduce((sum, a) => sum + (accountBalances[a.id] || 0), 0);
+  }, [normalizedAccounts, accountBalances]);
+
+  const cashVirtualBalance = summary.currentBalance - bankBalance;
 
   // For owner investment/withdrawal: set account fields appropriately
   React.useEffect(() => {
@@ -178,47 +210,28 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
     const description = adjustData.description || (adjustData.type === TransactionType.STARTUP ? t.deposit : t.withdraw);
 
     // Find the business account (default to first bank/cash account)
-    const businessAccount = accounts.find(acc => acc.type === 'Bank' || acc.type === 'Cash') || accounts[0];
+    const businessAccount = normalizedAccounts.find(acc => acc.type === AccountType.COMPANY_BANK || acc.type === AccountType.CASH) || normalizedAccounts[0];
 
     if (isSplit) {
-      // Find owner accounts
-      const ownerAAccount = accounts.find(acc => acc.name === Owner.OWNER_A);
-      const ownerBAccount = accounts.find(acc => acc.name === Owner.OWNER_B);
-      
-      const ownerAId = ownerAAccount?.id || Owner.OWNER_A;
-      const ownerBId = ownerBAccount?.id || Owner.OWNER_B;
-
-      const splitItems: Transaction[] = [
-        {
-          id: `${baseId}-A`,
-          receiptNumber: `${adjustData.receiptNumber}-A`,
-          date,
-          type: TransactionType.TRANSFER,
-          categoryId: adjustData.type === TransactionType.STARTUP ? 'owner_investment' : 'owner_withdrawal',
-          amount: amountNum / 2,
-          description: `[SPLIT] ${description}`,
-          contributedBy: ownerAId,
-          fromAccountId: adjustData.type === TransactionType.STARTUP ? ownerAId : businessAccount?.id,
-          toAccountId: adjustData.type === TransactionType.STARTUP ? businessAccount?.id : ownerAId,
-          updatedAt: new Date().toISOString(),
-          isInitialInvestment: adjustData.isInitialInvestment
-        },
-        {
-          id: `${baseId}-B`,
-          receiptNumber: `${adjustData.receiptNumber}-B`,
-          date,
-          type: TransactionType.TRANSFER,
-          categoryId: adjustData.type === TransactionType.STARTUP ? 'owner_investment' : 'owner_withdrawal',
-          amount: amountNum / 2,
-          description: `[SPLIT] ${description}`,
-          contributedBy: ownerBId,
-          fromAccountId: adjustData.type === TransactionType.STARTUP ? ownerBId : businessAccount?.id,
-          toAccountId: adjustData.type === TransactionType.STARTUP ? businessAccount?.id : ownerBId,
-          updatedAt: new Date().toISOString(),
-          isInitialInvestment: adjustData.isInitialInvestment
-        }
-      ];
-      await onAdd(splitItems);
+      const splitTransaction: Transaction = {
+        id: baseId,
+        receiptNumber: adjustData.receiptNumber,
+        date,
+        type: TransactionType.TRANSFER,
+        categoryId: adjustData.type === TransactionType.STARTUP ? 'owner_investment' : 'owner_withdrawal',
+        amount: amountNum,
+        description,
+        contributedBy: SPLIT_CONTRIBUTOR_LABEL,
+        fromAccountId: adjustData.type === TransactionType.STARTUP ? undefined : businessAccount?.id,
+        toAccountId: adjustData.type === TransactionType.STARTUP ? businessAccount?.id : undefined,
+        updatedAt: new Date().toISOString(),
+        isInitialInvestment: adjustData.isInitialInvestment,
+        splitMode: 'EQUAL',
+        splitRatioA: 0.5,
+        splitRatioB: 0.5,
+        items: [],
+      };
+      await onAdd(splitTransaction);
       
       setLastActionSummary({
         amount: amountNum,
@@ -228,7 +241,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
       });
     } else {
       // Find the specific owner account
-      const ownerAccount = accounts.find(acc => acc.name === adjustData.contributedBy);
+      const ownerAccount = normalizedAccounts.find(acc => acc.name === adjustData.contributedBy || acc.id === adjustData.contributedBy);
       const ownerId = ownerAccount?.id || adjustData.contributedBy;
 
       const newTransaction: Transaction = {
@@ -247,7 +260,8 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
           ? (adjustData.toAccountId || businessAccount?.id)
           : (adjustData.toAccountId || ownerId),
         updatedAt: new Date().toISOString(),
-        isInitialInvestment: adjustData.isInitialInvestment
+        isInitialInvestment: adjustData.isInitialInvestment,
+        items: [],
       };
 
       await onAdd(newTransaction);
@@ -295,31 +309,92 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
           </span>
         </div>
       )}
-      {/* Header */}
-      <div className="bg-[#0f172a] text-white p-8 rounded-[40px] shadow-2xl relative overflow-hidden flex flex-col md:flex-row justify-between items-center gap-6">
-        <div className="relative z-10 text-center md:text-left">
-          <h2 className="text-3xl font-black mb-2 tracking-tight text-white">{t.accountBalance}</h2>
-          <p className="text-slate-400 dark:text-slate-300 text-sm font-bold uppercase tracking-widest">{t.predictionDesc}</p>
-        </div>
-        <div className="flex flex-col items-center md:items-end gap-3 relative z-10">
-          <div className="bg-blue-600/20 backdrop-blur-md px-8 py-5 rounded-3xl border border-blue-500/30 text-center">
-            <p className="text-[10px] font-black uppercase tracking-widest text-blue-300 mb-1">{t.accountBalance}</p>
-            <p className="text-3xl font-black text-blue-400">¥ {summary.currentBalance.toLocaleString()}</p>
+      {/* Header — Balance Overview */}
+      <div className="bg-[#0f172a] text-white rounded-[40px] shadow-2xl overflow-hidden">
+        {/* Top bar: title + quick adjust */}
+        <div className="px-8 pt-8 pb-4 flex flex-col md:flex-row md:items-start justify-between gap-4">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-[0.25em] text-slate-500 mb-1">
+              {language === 'zh' ? '資金總覽' : 'Balance Overview'}
+            </p>
+            <h2 className="text-3xl font-black tracking-tight text-white">{t.accountBalance}</h2>
+            <p className="text-slate-500 text-xs font-bold mt-1 uppercase tracking-widest">{t.predictionDesc}</p>
           </div>
           {!isReadOnly && (
-            <button 
+            <button
               onClick={() => {
                 setShowQuickAdjust(true);
                 setAdjustData(prev => ({ ...prev, receiptNumber: `BANK-${Date.now().toString().slice(-6)}` }));
               }}
-              className="w-full md:w-auto px-6 py-3 bg-blue-600 hover:bg-blue-500 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-95 shadow-lg shadow-blue-600/20"
+              className="self-start px-6 py-3 bg-blue-600 hover:bg-blue-500 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-95 shadow-lg shadow-blue-600/20 whitespace-nowrap"
             >
               <i className="fas fa-exchange-alt mr-2"></i>
               {t.quickAdjust}
             </button>
           )}
         </div>
-        <i className="fas fa-university absolute -right-6 -bottom-6 text-[12rem] text-white/5 transform -rotate-12"></i>
+
+        {/* Overall balance headline */}
+        <div className="px-8 pb-6">
+          <p className="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-1">
+            {language === 'zh' ? '總體結餘' : 'Overall Balance'}
+          </p>
+          <p className="text-4xl font-black text-white tracking-tight">
+            ¥ {summary.currentBalance.toLocaleString()}
+          </p>
+        </div>
+
+        <div className="mx-6 mb-6 rounded-[28px] border border-white/10 bg-white/[0.03] p-4 md:p-5 overflow-hidden relative">
+          <div className="absolute inset-y-6 left-1/2 hidden md:block w-px bg-white/10"></div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 relative z-10">
+            <div className="relative bg-gradient-to-br from-[#0a1628] to-[#0d1f3c] border border-blue-500/20 rounded-[24px] p-6 overflow-hidden min-h-[170px]">
+              <i className="fas fa-university absolute -right-6 -bottom-4 text-[9rem] text-blue-500/[0.08] pointer-events-none select-none"></i>
+              <div className="relative z-10">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="w-9 h-9 rounded-xl bg-blue-500/20 flex items-center justify-center">
+                    <i className="fas fa-university text-blue-400 text-xs"></i>
+                  </div>
+                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-blue-300">
+                    {language === 'zh' ? '中銀餘額' : 'BOC Balance'}
+                  </p>
+                </div>
+                <p className="text-3xl font-black text-white">¥ {bankBalance.toLocaleString()}</p>
+                <p className="text-[10px] font-bold text-blue-300/55 mt-2 max-w-[240px] leading-relaxed">
+                  {language === 'zh' ? '銀行帳戶內的實際存款餘額' : 'Tracked balance held in the bank account'}
+                </p>
+              </div>
+            </div>
+
+            <div className="relative bg-gradient-to-br from-emerald-700/50 to-teal-950/90 border border-emerald-500/30 rounded-[24px] p-6 overflow-hidden min-h-[170px]">
+              <i className="fas fa-coins absolute -right-5 -bottom-4 text-[8rem] text-emerald-400/15 pointer-events-none select-none"></i>
+              <div className="relative z-10">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="w-9 h-9 rounded-xl bg-emerald-400/20 flex items-center justify-center">
+                    <i className="fas fa-coins text-emerald-300 text-xs"></i>
+                  </div>
+                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-300">
+                    {language === 'zh' ? '虛擬結餘' : 'Virtual Balance'}
+                  </p>
+                </div>
+                <p className="text-3xl font-black text-white">¥ {cashVirtualBalance.toLocaleString()}</p>
+                <p className="text-[10px] font-bold text-emerald-300/55 mt-2 max-w-[240px] leading-relaxed">
+                  {language === 'zh' ? '總體結餘扣除銀行餘額後的流動結餘' : 'Overall balance minus BOC balance'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="relative z-10 mt-4 rounded-2xl border border-white/10 bg-slate-950/30 px-4 py-3 flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">
+              {language === 'zh' ? '關係' : 'Relationship'}
+            </p>
+            <p className="text-xs font-bold text-slate-300">
+              {language === 'zh'
+                ? `總體結餘 = 中銀餘額 + 虛擬結餘`
+                : `Overall Balance = BOC Balance + Virtual Balance`}
+            </p>
+          </div>
+        </div>
       </div>
 
 
@@ -335,7 +410,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
               {t.partnerLedger}
             </h3>
             <p className="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-widest">
-              {language === 'zh' ? '個人銀行餘額及投資記錄' : 'Personal Bank Balance & Investment Records'}
+              {language === 'zh' ? '個人公數餘額及投資記錄' : 'Personal Cash Balance & Investment Records'}
             </p>
           </div>
           <div className="bg-white/10 px-6 py-3 rounded-2xl border border-white/10 flex items-center gap-4">
@@ -352,12 +427,11 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8 relative z-10">
-          {/* User 1 Stats */}
-                  <div className="bg-white/5 backdrop-blur-md p-8 rounded-[32px] border border-white/10 shadow-xl space-y-6">
+          <div className="bg-white/5 backdrop-blur-md p-8 rounded-[32px] border border-white/10 shadow-xl space-y-6">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 rounded-2xl bg-blue-500 flex items-center justify-center text-xs font-black shadow-lg shadow-blue-500/20">1</div>
-                <span className="text-sm font-black text-white uppercase tracking-widest">{language === 'zh' ? '共享' : 'SHARED'}</span>
+                <div className="w-10 h-10 rounded-2xl bg-blue-500 flex items-center justify-center text-xs font-black shadow-lg shadow-blue-500/20">{ownerInitials[Owner.OWNER_A]}</div>
+                <span className="text-sm font-black text-white uppercase tracking-widest">{ownerDisplayNames[Owner.OWNER_A]}</span>
               </div>
               <div className="text-right">
                 <p className="text-slate-400 dark:text-slate-300 text-[9px] font-black uppercase tracking-widest mb-1">
@@ -384,12 +458,11 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
             </div>
           </div>
 
-          {/* User 2 Stats */}
           <div className="bg-white/5 backdrop-blur-md p-8 rounded-[32px] border border-white/10 shadow-xl space-y-6">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 rounded-2xl bg-emerald-500 flex items-center justify-center text-xs font-black shadow-lg shadow-emerald-500/20">2</div>
-                <span className="text-sm font-black text-white uppercase tracking-widest">{language === 'zh' ? '共享' : 'SHARED'}</span>
+                <div className="w-10 h-10 rounded-2xl bg-emerald-500 flex items-center justify-center text-xs font-black shadow-lg shadow-emerald-500/20">{ownerInitials[Owner.OWNER_B]}</div>
+                <span className="text-sm font-black text-white uppercase tracking-widest">{ownerDisplayNames[Owner.OWNER_B]}</span>
               </div>
               <div className="text-right">
                 <p className="text-slate-400 dark:text-slate-300 text-[9px] font-black uppercase tracking-widest mb-1">
@@ -486,7 +559,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
         <div className="p-8 border-b border-slate-50 dark:border-white/5">
           <h3 className="text-sm font-black uppercase tracking-[0.2em] text-slate-800 dark:text-white">
             <i className="fas fa-history mr-2 text-blue-500"></i>
-            {language === 'zh' ? '最近資金記錄' : 'Recent Bank Records'}
+            {language === 'zh' ? '最近公數記錄' : 'Recent Cash Records'}
           </h3>
         </div>
         <div className="divide-y divide-slate-50 dark:divide-white/5">
@@ -535,7 +608,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
           )) : (
             <div className="p-20 text-center">
               <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4 dark:bg-white/5"><i className="fas fa-university text-slate-200 text-xl dark:text-slate-700"></i></div>
-              <p className="text-sm font-black text-slate-300 uppercase tracking-widest dark:text-slate-600">{language === 'zh' ? '暫無資金記錄' : 'No bank records found'}</p>
+              <p className="text-sm font-black text-slate-300 uppercase tracking-widest dark:text-slate-600">{language === 'zh' ? '暫無公數記錄' : 'No cash records found'}</p>
             </div>
           )}
         </div>
@@ -588,12 +661,12 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
               <div>
                 <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{t.contributedBy}</label>
                 <div className="flex gap-2 mb-2">
-                  <button type="button" onClick={() => setAdjustData({...adjustData, contributedBy: Owner.OWNER_A})} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase border transition-all ${adjustData.contributedBy === Owner.OWNER_A ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-500/20' : 'bg-white text-slate-500 border-slate-200 hover:border-blue-200 dark:bg-slate-800 dark:border-white/5 dark:text-slate-400'}`}>User 1</button>
-                  <button type="button" onClick={() => setAdjustData({...adjustData, contributedBy: Owner.OWNER_B})} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase border transition-all ${adjustData.contributedBy === Owner.OWNER_B ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-500/20' : 'bg-white text-slate-500 border-slate-200 hover:border-blue-200 dark:bg-slate-800 dark:border-white/5 dark:text-slate-400'}`}>User 2</button>
+                  <button type="button" onClick={() => setAdjustData({...adjustData, contributedBy: Owner.OWNER_A})} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase border transition-all ${adjustData.contributedBy === Owner.OWNER_A ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-500/20' : 'bg-white text-slate-500 border-slate-200 hover:border-blue-200 dark:bg-slate-800 dark:border-white/5 dark:text-slate-400'}`}>{ownerDisplayNames[Owner.OWNER_A]}</button>
+                  <button type="button" onClick={() => setAdjustData({...adjustData, contributedBy: Owner.OWNER_B})} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase border transition-all ${adjustData.contributedBy === Owner.OWNER_B ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-500/20' : 'bg-white text-slate-500 border-slate-200 hover:border-blue-200 dark:bg-slate-800 dark:border-white/5 dark:text-slate-400'}`}>{ownerDisplayNames[Owner.OWNER_B]}</button>
                 </div>
                 <div className="grid grid-cols-2 gap-2 mb-2">
                   <div>
-                    <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">From Account</label>
+                    <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{language === 'zh' ? '取錢帳戶' : 'From Account'}</label>
                     {adjustData.type === TransactionType.STARTUP ? (
                       <select
                         className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
@@ -601,7 +674,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
                         disabled
                         required
                       >
-                        <option value="">Select...</option>
+                        <option value="">{language === 'zh' ? '選擇項目' : 'Select...'}</option>
                         {partnerAccounts.map(acc => (
                           <option key={acc.id} value={acc.id}>{acc.name}</option>
                         ))}
@@ -614,7 +687,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
                         required
                         disabled={isSyncing || isReadOnly}
                       >
-                        <option value="">Select...</option>
+                        <option value="">{language === 'zh' ? '選擇項目' : 'Select...'}</option>
                         {nonOwnerAccounts.map(acc => (
                           <option key={acc.id} value={acc.id}>{acc.name}</option>
                         ))}
@@ -622,7 +695,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
                     )}
                   </div>
                   <div>
-                    <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">To Account</label>
+                    <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase mb-1">{language === 'zh' ? '收錢帳戶' : 'To Account'}</label>
                     {adjustData.type === TransactionType.STARTUP ? (
                       <select
                         className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none dark:bg-slate-800 dark:border-white/5 dark:text-white"
@@ -631,7 +704,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
                         required
                         disabled={isSyncing || isReadOnly}
                       >
-                        <option value="">Select...</option>
+                        <option value="">{language === 'zh' ? '選擇項目' : 'Select...'}</option>
                         {nonOwnerAccounts.map(acc => (
                           <option key={acc.id} value={acc.id}>{acc.name}</option>
                         ))}
@@ -760,7 +833,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
                 {lastActionSummary.type === TransactionType.STARTUP ? t.deposit : t.withdraw}
               </h3>
               <p className="text-slate-400 dark:text-slate-300 text-xs font-bold uppercase tracking-widest">
-                {lastActionSummary.owner}
+                {lastActionSummary.owner === 'SPLIT' ? lastActionSummary.owner : getOwnerDisplayName(lastActionSummary.owner)}
               </p>
             </div>
 

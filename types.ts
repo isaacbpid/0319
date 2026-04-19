@@ -56,15 +56,31 @@ export interface AuditLog {
   createdAt: string;
 }
 
+
+export interface TransactionItem {
+  id: string;
+  transactionId: string;
+  categoryId: string;
+  name: string;
+  price: number;
+  notes?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type TransactionSplitMode = 'NONE' | 'EQUAL';
+
 export interface Transaction {
   id: string;
   receiptNumber: string;
   date: string;
   type: TransactionType;
+  items: TransactionItem[];
+  // Legacy summary fields stay populated for compatibility.
   categoryId: string;
+  amount: number;
   fromAccountId?: string;
   toAccountId?: string;
-  amount: number;
   description: string;
   contributedBy: string;
   imageUrl?: string;
@@ -72,18 +88,128 @@ export interface Transaction {
   isInitialInvestment?: boolean;
   notes?: string;
   customerId?: string;
+  splitMode?: TransactionSplitMode;
+  splitRatioA?: number;
+  splitRatioB?: number;
+  checkoutOrderId?: string;
+  paymentStatus?: PaymentStatus;
+  paymentMethod?: PaymentMethod;
+  paymentCurrency?: PaymentCurrency;
 }
 
 export interface Customer {
   id: string;
   name: string;
+  chineseName?: string;
+  firstName?: string;
+  lastName?: string;
+  group?: string;
   phone?: string;
-  vehicleMake?: string;
-  vehicleModel?: string;
-  vehicleColor?: string;
+  countryCode?: string;
+  vehicleId?: string;
+  email?: string;
+  company?: string;
+  companyCode?: string;
+  birthday?: string;
+  referenceId?: string;
+  timeZone?: string;
+  appointmentNotifications?: string;
+  country?: string;
+  addressLine1?: string;
+  birthMonth?: string;
+  birthDay?: string;
+  birthYear?: string;
+  subscribeToEmailMarketing?: boolean;
   notes?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface Vehicle {
+  id: string;
+  customerId: string;
+  licensePlate?: string;
+  make?: string;
+  model?: string;
+  color?: string;
+  vehicleType?: VehicleType;
+  vehicleSize?: VehicleSize;
+  year?: string;
+  vin?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export enum VehicleType {
+  SEDAN = 'sedan',
+  COUPE = 'coupe',
+  SPORTS = 'sports',
+  SUV = 'suv',
+  PICKUP = 'pickup',
+  MPV = 'mpv',
+  VAN = 'van',
+  LIMOUSINE = 'limousine',
+}
+
+export enum VehicleSize {
+  REGULAR = 'regular',
+  LARGE = 'large',
+}
+
+export interface MembershipTier {
+  id: string;
+  name: string;
+  statusPointsThreshold: number;
+  discountRate: number;
+  discountEligibleCarLimit: number;
+  upgradeThreshold: number;
+  priorityLevel: number;
+  exclusiveEvents: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt?: string;
+
+  // Extended benefit model fields.
+  statusPoints: number;
+  birthdayGift: boolean;
+  discountedRate: number;
+  linkedLicensePlates: number;
+  complimentaryCarCareUpgrade: number;
+  priorityWash: number;
+  exclusiveInvitation: boolean;
+}
+
+export interface CustomerMembership {
+  id: string;
+  customerId: string;
+  tierId: string;
+  discountRateSnapshot: number;
+  discountEligibleCarLimitSnapshot: number;
+  priorityLevelSnapshot: number;
+  exclusiveEventsSnapshot: boolean;
+  statusPoints: number;
+  startAt: string;
+  endAt?: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt?: string;
+
+  // Extended benefit model snapshots.
+  statusPointsSnapshot: number;
+  birthdayGiftSnapshot: boolean;
+  discountedRateSnapshot: number;
+  linkedLicensePlatesSnapshot: number;
+  complimentaryCarCareUpgradeSnapshot: number;
+  priorityWashSnapshot: number;
+  exclusiveInvitationSnapshot: boolean;
+}
+
+export interface CustomerGroup {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export interface AdminSession {
@@ -107,6 +233,96 @@ export interface CategoryItem {
   name: string;
   type: TransactionType;
   createdAt: string;
+  updatedAt?: string;
+  description?: string;
+  price?: number;
+  imageUrl?: string;
+  estimatedDurationMinutes?: number;
+  isActiveService?: boolean;
+}
+
+export interface DiscountItem {
+  id: string;
+  name: string;
+  code?: string;
+  effectType?: 'discount' | 'surcharge';
+  amountType: 'fixed' | 'percent';
+  amount: number;
+  category?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export enum CheckoutOrderStatus {
+  DRAFT = 'draft',
+  COMMITTED = 'committed',
+  CHECKED_OUT = 'checked_out'
+}
+
+export type PaymentStatus = 'pending' | 'paid';
+
+export enum PaymentMethod {
+  FPS = 'FPS',
+  PAYME = 'Payme',
+  HKD_CASH = 'HKD_cash',
+  RMB_CASH = 'RMB_cash',
+  ALIPAY = 'Alipay',
+  WECHAT = 'wechat',
+  MOP_CASH = 'MOP_cash',
+  MPAY = 'MPay'
+}
+
+export enum PaymentCurrency {
+  HKD = 'HKD',
+  RMB = 'RMB',
+  MOP = 'MOP'
+}
+
+export interface CheckoutOrderLine {
+  id: string;
+  saleId: string;
+  categoryId?: string;
+  name: string;
+  quantity: number;
+  unitPrice: number;
+  lineSubtotal: number;
+  estimatedDurationMinutes?: number;
+  serviceNameSnapshot?: string;
+  isDiscount: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface CheckoutOrder {
+  id: string;
+  customerId?: string;
+  vehicleId?: string;
+  status: CheckoutOrderStatus;
+  occurredAt?: string;
+  checkInAt?: string;
+  committedAt?: string;
+  checkedOutAt?: string;
+  grossAmount: number;
+  largeVehicleSurchargeApplied?: boolean;
+  largeVehicleSurchargeRate?: number;
+  largeVehicleSurchargeAmount?: number;
+  discountCode?: string;
+  surchargeCode?: string;
+  membershipDiscountAmount: number;
+  couponDiscountAmount: number;
+  netAmount: number;
+  estimatedDurationMinutes: number;
+  estimatedFinishAt?: string;
+  notes?: string;
+  paymentStatus?: PaymentStatus;
+  paymentMethod?: PaymentMethod;
+  paymentCurrency?: PaymentCurrency;
+  paidAmount?: number;
+  paidAt?: string;
+  linkedTransactionId?: string;
+  createdAt: string;
+  updatedAt?: string;
+  lines: CheckoutOrderLine[];
 }
 
 // New database schema types

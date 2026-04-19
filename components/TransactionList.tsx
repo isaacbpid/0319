@@ -1,20 +1,24 @@
 
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
+import QRCode from 'qrcode';
 // Sort directions
 const SORTS = {
   ASC: 'asc',
   DESC: 'desc',
 };
 
-import { Transaction, TransactionType, Owner, Account, CategoryItem } from '../types';
+import { Transaction, TransactionType, Owner, Account, CategoryItem, Customer } from '../types';
 import { translations } from '../translations';
+import { getPrimaryCategoryId, getTransactionAmount, getTransactionDescription, getTransactionItemSummary, normalizeTransactionItems } from '../utils/transactionItems';
+import { getSplitDisplayLabel, isSplitTransaction } from '../utils/transactionSplit';
 
 interface TransactionListProps {
   transactions: Transaction[];
   accounts: Account[];
   categories: CategoryItem[];
+  customers?: Customer[];
   onDelete: (id: string) => void;
-  onUpdate: (tr: Transaction) => void;
+  onUpdate: (tr: Transaction, noteText?: string) => void;
   onBulkUpdate: (items: Transaction[]) => void;
   onExportExcel: () => void;
   onExportJSON: () => void;
@@ -22,12 +26,15 @@ interface TransactionListProps {
   isSyncing?: boolean;
   isReadOnly?: boolean;
   filter?: (tr: Transaction) => boolean;
+  openTransactionId?: string | null;
+  initialSearchTerm?: string;
+  onOpenTransactionHandled?: () => void;
 }
 
 type SizeFilter = 'ALL' | 'SMALL' | 'MEDIUM' | 'LARGE';
 type DateFilter = 'ALL' | 'TODAY' | 'WEEK' | 'MONTH' | 'CUSTOM';
 
-const TransactionList: React.FC<TransactionListProps> = ({ transactions, accounts, categories, onDelete, onUpdate, onBulkUpdate, onExportExcel, onExportJSON, language, isSyncing, isReadOnly, filter }) => {
+const TransactionList: React.FC<TransactionListProps> = ({ transactions = [], accounts = [], categories = [], customers = [], onDelete, onUpdate, onBulkUpdate, onExportExcel, onExportJSON, language, isSyncing, isReadOnly, filter, openTransactionId, initialSearchTerm, onOpenTransactionHandled }) => {
   const t = translations[language];
   const normalizedAccounts = useMemo(() => {
     const cleaned = (accounts || [])
@@ -54,6 +61,10 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
     return normalizedAccounts.find(a => a.id === accountId)?.name || accountId;
   };
 
+  const getContributorLabel = (transaction: Transaction) => {
+    return getSplitDisplayLabel(transaction, language) || transaction.contributedBy;
+  };
+
   const [search, setSearch] = useState('');
   // sort: { column: string, direction: 'asc' | 'desc' }
   const [sort, setSort] = useState<{ column: string; direction: 'asc' | 'desc' }>({ column: 'date', direction: SORTS.DESC });
@@ -64,23 +75,34 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
   const [endDate, setEndDate] = useState('');
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [editingTr, setEditingTr] = useState<Transaction | null>(null);
   const [viewingPhoto, setViewingPhoto] = useState<string | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectionMode, setSelectionMode] = useState(false);
+  const [viewingTransaction, setViewingTransaction] = useState<Transaction | null>(null);
+  const [isViewEditMode, setIsViewEditMode] = useState(false);
+  const [detailDraft, setDetailDraft] = useState<Transaction | null>(null);
+  const [transactionQrDataUrl, setTransactionQrDataUrl] = useState<string>('');
   const longPressTimer = useRef<NodeJS.Timeout | null>(null);
 
+  const customerById = useMemo(() => {
+    const map = new Map<string, Customer>();
+    for (const customer of customers) {
+      map.set(customer.id, customer);
+    }
+    return map;
+  }, [customers]);
+
   const editCategories = useMemo(() => {
-    if (!editingTr) return categories;
-    if (editingTr.type === TransactionType.EXPENSE) {
+    if (!detailDraft) return categories;
+    if (detailDraft.type === TransactionType.EXPENSE) {
       return categories.filter(category => category.type === TransactionType.EXPENSE);
     }
-    if (editingTr.type === TransactionType.REVENUE) {
+    if (detailDraft.type === TransactionType.REVENUE) {
       return categories.filter(category => category.type === TransactionType.REVENUE);
     }
     return categories;
-  }, [categories, editingTr]);
+  }, [categories, detailDraft]);
 
   const toggleSelection = (id: string) => {
     const newSelected = new Set(selectedIds);
@@ -170,6 +192,37 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
     return '';
   };
 
+  useEffect(() => {
+    if (!initialSearchTerm) return;
+    setSearch(initialSearchTerm);
+    if (onOpenTransactionHandled) onOpenTransactionHandled();
+  }, [initialSearchTerm, onOpenTransactionHandled]);
+
+  useEffect(() => {
+    if (!openTransactionId) return;
+    const matched = transactions.find(transaction => transaction.id === openTransactionId || transaction.receiptNumber === openTransactionId);
+    if (matched) {
+      setViewingTransaction(matched);
+      setDetailDraft(matched);
+      setIsViewEditMode(false);
+    } else {
+      setSearch(openTransactionId);
+    }
+    if (onOpenTransactionHandled) onOpenTransactionHandled();
+  }, [openTransactionId, transactions, onOpenTransactionHandled]);
+
+  useEffect(() => {
+    if (!viewingTransaction) {
+      setTransactionQrDataUrl('');
+      return;
+    }
+
+    const payload = `app://transaction/${encodeURIComponent(viewingTransaction.receiptNumber)}`;
+    QRCode.toDataURL(payload, { width: 280, margin: 1 })
+      .then(setTransactionQrDataUrl)
+      .catch(() => setTransactionQrDataUrl(''));
+  }, [viewingTransaction]);
+
   const filtered = useMemo(() => {
     const now = new Date();
     now.setHours(0, 0, 0, 0);
@@ -242,7 +295,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
       let displayOwner = first.contributedBy as string;
       const owners = new Set(group.map(g => g.contributedBy));
       if (owners.size > 1) {
-        displayOwner = "User 1 & User 2";
+        displayOwner = language === 'zh' ? "公數攤分" : "User 1 & User 2";
       }
       return {
         ...first,
@@ -277,6 +330,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
 
   const confirmDelete = async () => {
     if (deletingId) {
+      const deletingNow = deletingId;
       // If it's a grouped transaction, we might want to delete all parts
       const groupedTr = displayTransactions.find(t => (t as any).id === deletingId) as any;
       if (groupedTr && groupedTr.originalIds) {
@@ -287,48 +341,88 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
         await onDelete(deletingId);
       }
       setDeletingId(null);
-    }
-  };
-
-  const handleEditSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (editingTr) {
-      const isExpenseEdit = editingTr.type === TransactionType.EXPENSE;
-      const selectedCategory = categories.find(category => category.id === editingTr.categoryId);
-      const normalizedEditedTransaction: Transaction = {
-        ...editingTr,
-        toAccountId: isExpenseEdit ? undefined : editingTr.toAccountId,
-        description: isExpenseEdit ? (selectedCategory?.name || editingTr.description) : editingTr.description
-      };
-
-      const tr = editingTr as any;
-      if (tr.isGrouped && tr.originalIds) {
-        // Update all parts of the grouped transaction
-        const amountPerPart = tr.amount / tr.originalIds.length;
-        const updatedItems = tr.originalIds.map((id: string) => ({
-          ...normalizedEditedTransaction,
-          id,
-          amount: amountPerPart,
-          isGrouped: undefined,
-          originalIds: undefined
-        }));
-        await onBulkUpdate(updatedItems);
-      } else {
-        await onUpdate(normalizedEditedTransaction);
+      if (viewingTransaction && (viewingTransaction as any).id === deletingNow) {
+        setViewingTransaction(null);
+        setDetailDraft(null);
+        setIsViewEditMode(false);
       }
-      setEditingTr(null);
     }
   };
 
   const editPhotoRef = useRef<HTMLInputElement>(null);
   const handleEditPhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !editingTr) return;
+    if (!file || !detailDraft) return;
     const reader = new FileReader();
     reader.onload = () => {
-      setEditingTr({ ...editingTr, imageUrl: reader.result as string });
+      setDetailDraft({ ...detailDraft, imageUrl: reader.result as string });
     };
     reader.readAsDataURL(file);
+  };
+
+  const saveDetailEdit = async () => {
+    if (!detailDraft || !viewingTransaction) return;
+
+    const isExpenseEdit = detailDraft.type === TransactionType.EXPENSE;
+    const selectedCategory = categories.find(category => category.id === detailDraft.categoryId);
+    const currentItems = normalizeTransactionItems(detailDraft);
+    const nextItems = currentItems.length <= 1
+      ? [{
+          id: currentItems[0]?.id || `${detailDraft.id}_item_1`,
+          transactionId: detailDraft.id,
+          categoryId: detailDraft.categoryId,
+          name: selectedCategory?.name || detailDraft.description || detailDraft.categoryId,
+          price: Number(detailDraft.amount),
+          notes: currentItems[0]?.notes,
+        }]
+      : currentItems.map((item, index) => ({
+          ...item,
+          id: item.id || `${detailDraft.id}_item_${index + 1}`,
+          transactionId: detailDraft.id,
+        }));
+    const normalizedEditedTransaction: Transaction = {
+      ...detailDraft,
+      items: nextItems,
+      categoryId: getPrimaryCategoryId({ ...detailDraft, items: nextItems }),
+      amount: getTransactionAmount({ ...detailDraft, items: nextItems }),
+      toAccountId: isExpenseEdit ? undefined : detailDraft.toAccountId,
+      description: currentItems.length <= 1
+        ? (isExpenseEdit ? (selectedCategory?.name || detailDraft.description) : detailDraft.description)
+        : getTransactionDescription({ ...detailDraft, items: nextItems }),
+    };
+
+    const tr = viewingTransaction as any;
+    if (tr.isGrouped && tr.originalIds) {
+      const amountPerPart = normalizedEditedTransaction.amount / tr.originalIds.length;
+      const updatedItems = tr.originalIds.map((id: string) => ({
+        ...normalizedEditedTransaction,
+        id,
+        amount: amountPerPart,
+        items: normalizeTransactionItems(normalizedEditedTransaction).map(item => ({
+          ...item,
+          price: Number((item.price / tr.originalIds.length).toFixed(2))
+        })),
+        isGrouped: undefined,
+        originalIds: undefined,
+      }));
+      await onBulkUpdate(updatedItems);
+    } else {
+      await onUpdate(normalizedEditedTransaction);
+    }
+
+    setViewingTransaction(normalizedEditedTransaction);
+    setDetailDraft(normalizedEditedTransaction);
+    setIsViewEditMode(false);
+  };
+
+  const openTransactionDetail = (transaction: Transaction) => {
+    if (selectionMode) {
+      toggleSelection(transaction.id);
+      return;
+    }
+    setViewingTransaction(transaction);
+    setDetailDraft(transaction);
+    setIsViewEditMode(false);
   };
 
   return (
@@ -359,7 +453,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                     <i className="fas fa-trash-alt mr-1"></i> {t.delete}
                   </button>
                   <button onClick={handleBulkToggleInvestment} className="text-[10px] font-black uppercase tracking-widest text-blue-500 hover:text-blue-600">
-                    <i className="fas fa-rocket mr-1"></i> {language === 'zh' ? '切換投資' : 'Toggle Invest'}
+                    <i className="fas fa-rocket mr-1"></i> {language === 'zh' ? '切換投資' : 'Toggle Invest'}    
                   </button>
                 </div>
               </div>
@@ -573,7 +667,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                   onMouseLeave={handleTouchEnd}
                   onTouchStart={() => handleTouchStart(tr.id)}
                   onTouchEnd={handleTouchEnd}
-                  onClick={() => selectionMode && toggleSelection(tr.id)}
+                  onClick={() => openTransactionDetail(tr)}
                 >
                   <td className="px-6 py-5 whitespace-nowrap text-xs font-bold text-slate-500 dark:text-slate-400">
                     <div className="flex items-center gap-3">
@@ -639,18 +733,13 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                       )}
                     </div>
                   </td>
-                  <td className="px-6 py-5 whitespace-nowrap text-sm"><span className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest ${tr.contributedBy === Owner.OWNER_A ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400' : tr.contributedBy === Owner.OWNER_B ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400' : 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/20 dark:text-indigo-400'}`}>{tr.contributedBy}</span></td>
+                  <td className="px-6 py-5 whitespace-nowrap text-sm"><span className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest ${isSplitTransaction(tr) ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/20 dark:text-indigo-400' : tr.contributedBy === Owner.OWNER_A ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400' : tr.contributedBy === Owner.OWNER_B ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400' : 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/20 dark:text-indigo-400'}`}>{getContributorLabel(tr)}</span></td>
                   <td className={`px-6 py-5 whitespace-nowrap text-right font-black text-sm tracking-tight ${tr.type === TransactionType.REVENUE ? 'text-emerald-600 dark:text-emerald-400' : (tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? 'text-blue-600 dark:text-blue-400' : 'text-slate-800 dark:text-white'}`}>
                     {(tr.type === TransactionType.REVENUE || tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? '+' : '-'} ¥{tr.amount.toLocaleString()}
                   </td>
                   <td className="px-6 py-5 text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      {!isReadOnly && (
-                        <>
-                          <button onClick={() => setEditingTr(tr)} className="w-8 h-8 rounded-full flex items-center justify-center text-slate-200 hover:text-blue-500 hover:bg-blue-50 transition-all active:scale-90 dark:text-slate-600 dark:hover:bg-blue-900/20 dark:hover:text-blue-400"><i className="fas fa-edit text-xs"></i></button>
-                          <button onClick={() => setDeletingId(tr.id)} className="w-8 h-8 rounded-full flex items-center justify-center text-slate-200 hover:text-rose-500 hover:bg-rose-50 transition-all active:scale-90 dark:text-slate-600 dark:hover:bg-rose-900/20 dark:hover:text-rose-400"><i className="fas fa-trash-alt text-xs"></i></button>
-                        </>
-                      )}
+                    <div className="text-[10px] font-black uppercase tracking-widest text-slate-300 dark:text-slate-600">
+                      {language === 'zh' ? '點擊查看' : 'Tap to view'}
                     </div>
                   </td>
                 </tr>
@@ -679,7 +768,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
               onMouseLeave={handleTouchEnd}
               onTouchStart={() => handleTouchStart(tr.id)}
               onTouchEnd={handleTouchEnd}
-              onClick={() => selectionMode && toggleSelection(tr.id)}
+              onClick={() => openTransactionDetail(tr)}
             >
               <div className="flex justify-between items-start mb-3">
                 <div className="flex items-center gap-3">
@@ -731,19 +820,18 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
               
               <div className="flex justify-between items-center">
                 <div className="flex items-center gap-2">
-                  <span className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${tr.contributedBy === Owner.OWNER_A ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400' : tr.contributedBy === Owner.OWNER_B ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400' : 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/20 dark:text-indigo-400'}`}>
-                    {tr.contributedBy}
+                  <span className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${isSplitTransaction(tr) ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/20 dark:text-indigo-400' : tr.contributedBy === Owner.OWNER_A ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400' : tr.contributedBy === Owner.OWNER_B ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400' : 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/20 dark:text-indigo-400'}`}>
+                    {getContributorLabel(tr)}
                   </span>
-                  {tr.description && <span className="text-[10px] font-medium text-slate-400 dark:text-slate-300 truncate max-w-[150px]">{tr.description}</span>}
+                  {tr.items && tr.items.length > 1 ? (
+                    <span className="text-[10px] font-medium text-slate-400 dark:text-slate-300 truncate max-w-[170px]">{getTransactionItemSummary(tr)}</span>
+                  ) : tr.description ? (
+                    <span className="text-[10px] font-medium text-slate-400 dark:text-slate-300 truncate max-w-[150px]">{tr.description}</span>
+                  ) : null}
                 </div>
-                <div className="flex items-center gap-2">
-                  {!isReadOnly && (
-                    <>
-                      <button onClick={() => setEditingTr(tr)} className="w-9 h-9 rounded-full bg-slate-50 flex items-center justify-center text-slate-400 active:scale-90 dark:bg-white/5 dark:text-slate-500"><i className="fas fa-edit text-xs"></i></button>
-                      <button onClick={() => setDeletingId(tr.id)} className="w-9 h-9 rounded-full bg-slate-50 flex items-center justify-center text-slate-400 active:scale-90 dark:bg-white/5 dark:text-slate-500"><i className="fas fa-trash-alt text-xs"></i></button>
-                    </>
-                  )}
-                </div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-300 dark:text-slate-600">
+                  {language === 'zh' ? '點擊查看' : 'Tap to view'}
+                </span>
               </div>
             </div>
           )) : (
@@ -755,201 +843,9 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
         </div>
       </div>
 
-      {/* Delete Confirmation Modal */}
-      {deletingId && (
-        <div className="fixed inset-0 z-[160] flex items-center justify-center bg-slate-950/60 backdrop-blur-md p-4 animate-in fade-in duration-200">
-          <div className="bg-white w-full max-w-sm rounded-[32px] shadow-2xl p-8 space-y-6 animate-in zoom-in-95 dark:bg-slate-900">
-            <div className="text-center">
-              <div className="w-16 h-16 bg-rose-50 rounded-full flex items-center justify-center mx-auto mb-4 text-rose-500 dark:bg-rose-900/20"><i className="fas fa-exclamation-triangle text-2xl"></i></div>
-              <h3 className="text-lg font-black text-slate-900 mb-2 dark:text-white">{t.deleteConfirmTitle}</h3>
-              <p className="text-sm font-bold text-slate-500 dark:text-slate-300">{t.deleteConfirmMessage}</p>
-            </div>
-            <div className="flex gap-3">
-              <button 
-                onClick={() => setDeletingId(null)} 
-                disabled={isSyncing}
-                className="flex-1 py-4 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-widest transition-all active:scale-95 dark:bg-white/5 dark:text-slate-400 dark:hover:bg-white/10"
-              >
-                {t.cancel}
-              </button>
-              <button 
-                onClick={confirmDelete} 
-                disabled={isSyncing}
-                className={`flex-1 py-4 bg-rose-700 hover:bg-rose-800 text-white dark:text-white border border-rose-800 rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-lg shadow-rose-700/30 active:scale-95 flex items-center justify-center gap-2 ${isSyncing ? 'opacity-70' : ''}`}
-              >
-                TEST BUTTON
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Edit Modal with Unit Indicator */}
-      {editingTr && (
-        <div className="fixed inset-0 z-[160] flex items-center justify-center bg-slate-950/60 backdrop-blur-md p-4 animate-in fade-in duration-200">
-          <div className="bg-white w-full max-w-lg rounded-[32px] shadow-2xl p-8 space-y-6 animate-in zoom-in-95 overflow-y-auto max-h-[90vh] dark:bg-slate-900">
-            <div className="flex justify-between items-center">
-              <h3 className="text-xl font-black text-slate-900 dark:text-white">{t.editEntry}</h3>
-              <button onClick={() => setEditingTr(null)} className="text-slate-400 p-2"><i className="fas fa-times"></i></button>
-            </div>
-            <form onSubmit={handleEditSubmit} className="space-y-4">
-               <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{t.type}</label>
-                    <select value={editingTr.type} onChange={e => {
-                      const nextType = e.target.value as TransactionType;
-                      const nextCategory = categories.find(category => category.type === nextType);
-                      setEditingTr({
-                        ...editingTr,
-                        type: nextType,
-                        categoryId: nextCategory?.id || editingTr.categoryId,
-                        description: nextType === TransactionType.EXPENSE
-                          ? (nextCategory?.name || editingTr.description)
-                          : editingTr.description,
-                        toAccountId: nextType === TransactionType.EXPENSE ? undefined : editingTr.toAccountId
-                      });
-                    }} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5">
-                      <option value={TransactionType.REVENUE}>{t.revenue}</option>
-                      <option value={TransactionType.EXPENSE}>{t.expense}</option>
-                      <option value={TransactionType.STARTUP}>{t.startupCosts}</option>
-                      <option value={TransactionType.WITHDRAWAL}>{t.withdraw}</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{t.category}</label>
-                    <select value={editingTr.categoryId} onChange={e => {
-                      const nextCategoryId = e.target.value;
-                      const nextCategory = editCategories.find(category => category.id === nextCategoryId);
-                      setEditingTr({
-                        ...editingTr,
-                        categoryId: nextCategoryId,
-                        description: editingTr.type === TransactionType.EXPENSE
-                          ? (nextCategory?.name || editingTr.description)
-                          : editingTr.description
-                      });
-                    }} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5">
-                      {editCategories.map(category => (
-                        <option key={category.id} value={category.id}>{category.name}</option>
-                      ))}
-                    </select>
-                  </div>
-               </div>
-
-               <div>
-                 <div className="flex justify-between items-center mb-1">
-                   <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase">{t.amount} (RMB)</label>
-                   <span className="text-[10px] font-black text-blue-600 animate-pulse dark:text-blue-400">{getAmountUnit(editingTr.amount)}</span>
-                 </div>
-                 <div className="relative">
-                   <input 
-                     type="number" value={editingTr.amount} 
-                     onChange={e => setEditingTr({...editingTr, amount: Number(e.target.value)})}
-                     className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5"
-                   />
-                 </div>
-               </div>
-
-               <div>
-                 <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{t.date}</label>
-                 <input type="date" value={editingTr.date.slice(0, 10)} onChange={e => setEditingTr({...editingTr, date: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5" />
-               </div>
-
-               <div>
-                  <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{t.uploadPhoto}</label>
-                  <div className="flex items-center gap-4">
-                    <button type="button" onClick={() => editPhotoRef.current?.click()} className="flex-1 py-3 px-4 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-black uppercase text-slate-900 dark:text-slate-400 dark:bg-slate-800 dark:border-white/5">
-                      {editingTr.imageUrl ? t.changePhoto : t.uploadPhoto}
-                    </button>
-                    {editingTr.imageUrl && (
-                      <div className="relative w-12 h-12 rounded-xl overflow-hidden border border-slate-200 group dark:border-white/10">
-                        <img src={editingTr.imageUrl} className="w-full h-full object-cover" />
-                        <button type="button" onClick={() => setEditingTr({...editingTr, imageUrl: undefined})} className="absolute inset-0 bg-black/40 flex items-center justify-center text-white text-xs opacity-0 group-hover:opacity-100 transition-opacity"><i className="fas fa-times"></i></button>
-                      </div>
-                    )}
-                  </div>
-                  <input type="file" ref={editPhotoRef} onChange={handleEditPhoto} accept="image/*" className="hidden" />
-               </div>
-
-                <div>
-                  <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{t.description}</label>
-                  {editingTr.type === TransactionType.EXPENSE ? (
-                    <div className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white dark:bg-slate-800 dark:border-white/5">
-                      {editingTr.description || (language === 'zh' ? '請先選擇支出分類' : 'Select an expense category first')}
-                    </div>
-                  ) : (
-                    <div className="relative">
-                      <textarea value={editingTr.description} onChange={e => setEditingTr({...editingTr, description: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5" rows={2}></textarea>
-                    </div>
-                  )}
-               </div>
-
-               <div>
-                  <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{language === 'zh' ? 'Transaction Notes (手動輸入)' : 'Transaction Notes'}</label>
-                  <div className="relative">
-                    <textarea value={editingTr.notes || ''} onChange={e => setEditingTr({...editingTr, notes: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5" rows={3} placeholder={language === 'zh' ? '手動輸入備註，不會自動帶入分類...' : 'Enter notes manually. This will not auto-copy category...'}></textarea>
-                  </div>
-               </div>
-
-               <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{language === 'zh' ? '出賬賬戶' : 'From Account'}</label>
-                    <select 
-                      value={editingTr.fromAccountId || ''} 
-                      onChange={e => setEditingTr({...editingTr, fromAccountId: e.target.value || undefined})} 
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5"
-                    >
-                      <option value="">None</option>
-                      {normalizedAccounts.map(a => (
-                        <option key={a.id} value={a.id}>{a.id} - {a.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{language === 'zh' ? '入賬賬戶' : 'To Account'}</label>
-                    <select 
-                      value={editingTr.toAccountId || ''} 
-                      onChange={e => setEditingTr({...editingTr, toAccountId: e.target.value || undefined})} 
-                      disabled={editingTr.type === TransactionType.EXPENSE}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5"
-                    >
-                      <option value="">None</option>
-                      {normalizedAccounts.map(a => (
-                        <option key={a.id} value={a.id}>{a.id} - {a.name}</option>
-                      ))}
-                    </select>
-                  </div>
-               </div>
-
-               <div>
-                  <label className="block text-[10px] font-black text-slate-900 dark:text-white uppercase mb-1">{language === 'zh' ? '資金來源 (contributed_by)' : 'Funded By (contributed_by)'}</label>
-                  <select
-                    value={editingTr.contributedBy || ''}
-                    onChange={e => setEditingTr({...editingTr, contributedBy: e.target.value})}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:text-white outline-none dark:bg-slate-800 dark:border-white/5"
-                  >
-                    <option value="">{language === 'zh' ? '選擇賬戶 ID' : 'Select Account ID'}</option>
-                    {normalizedAccounts.map(a => (
-                      <option key={a.id} value={a.id}>{a.id}</option>
-                    ))}
-                  </select>
-               </div>
-
-               <button 
-                 type="submit" 
-                 disabled={isSyncing}
-                 className={`w-full bg-blue-600 text-white font-black py-4 rounded-2xl text-xs uppercase tracking-widest shadow-lg active:scale-95 transition-all dark:shadow-none flex items-center justify-center gap-2 ${isSyncing ? 'opacity-70' : ''}`}
-               >
-                 {isSyncing && <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>}
-                 {t.update}
-               </button>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* Single Delete Confirmation */}
       {deletingId && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[200] flex items-center justify-center p-4 animate-in fade-in duration-200">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[260] flex items-center justify-center p-4 animate-in fade-in duration-200">
           <div className="bg-white dark:bg-slate-900 rounded-[32px] p-8 max-w-sm w-full shadow-2xl border border-slate-100 dark:border-white/10 animate-in zoom-in-95 duration-200">
             <div className="w-16 h-16 bg-rose-50 dark:bg-rose-900/20 rounded-full flex items-center justify-center mx-auto mb-6">
               <i className="fas fa-exclamation-triangle text-2xl text-rose-500"></i>
@@ -962,7 +858,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
             </p>
             <div className="flex gap-3">
               <button 
-                onClick={async () => { await onDelete(deletingId); setDeletingId(null); }}
+                onClick={confirmDelete}
                 className="flex-1 bg-rose-700 hover:bg-rose-800 text-white dark:text-white border border-rose-800 font-black py-4 rounded-2xl shadow-xl shadow-rose-700/30 transition-all active:scale-95 text-xs uppercase tracking-widest"
               >
                 {t.delete}
@@ -980,7 +876,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
 
       {/* Bulk Delete Confirmation */}
       {showBulkDeleteConfirm && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[200] flex items-center justify-center p-4 animate-in fade-in duration-200">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[260] flex items-center justify-center p-4 animate-in fade-in duration-200">
           <div className="bg-white dark:bg-slate-900 rounded-[32px] p-8 max-w-sm w-full shadow-2xl border border-slate-100 dark:border-white/10 animate-in zoom-in-95 duration-200">
             <div className="w-16 h-16 bg-rose-50 dark:bg-rose-900/20 rounded-full flex items-center justify-center mx-auto mb-6">
               <i className="fas fa-trash-alt text-2xl text-rose-500"></i>
@@ -1033,6 +929,317 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions, account
                 <i className="fas fa-times"></i>
                 {t.close || (language === 'zh' ? '關閉' : 'Close')}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {viewingTransaction && (
+        <div className="fixed inset-0 z-[220] bg-slate-100 dark:bg-slate-950 overflow-y-auto">
+          <div className="max-w-2xl mx-auto min-h-screen px-4 py-5 pb-10">
+            <div className="flex items-center justify-between mb-8">
+              <button
+                onClick={() => {
+                  setViewingTransaction(null);
+                  setDetailDraft(null);
+                  setIsViewEditMode(false);
+                }}
+                className="w-12 h-12 rounded-full bg-slate-200 dark:bg-white/10 flex items-center justify-center text-slate-700 dark:text-slate-100"
+              >
+                <i className="fas fa-arrow-left text-xl"></i>
+              </button>
+              <div className="text-sm font-black text-slate-500 uppercase tracking-widest">
+                {language === 'zh' ? '交易詳情' : 'Transaction Detail'}
+              </div>
+              {!isReadOnly ? (
+                <div className="flex items-center gap-2">
+                  {isViewEditMode ? (
+                    <>
+                      <button
+                        onClick={() => {
+                          setIsViewEditMode(false);
+                          setDetailDraft(viewingTransaction);
+                        }}
+                        className="px-3 h-10 rounded-full bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-200 text-[10px] font-black uppercase tracking-widest"
+                      >
+                        {t.cancel}
+                      </button>
+                      <button
+                        onClick={saveDetailEdit}
+                        disabled={isSyncing}
+                        className="px-4 h-10 rounded-full bg-blue-600 text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-50"
+                      >
+                        {isSyncing ? t.syncing : t.update}
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => {
+                          setIsViewEditMode(true);
+                          setDetailDraft(viewingTransaction);
+                        }}
+                        className="w-10 h-10 rounded-full bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-200 flex items-center justify-center"
+                      >
+                        <i className="fas fa-pen text-sm"></i>
+                      </button>
+                      <button
+                        onClick={() => setDeletingId(viewingTransaction.id)}
+                        className="w-10 h-10 rounded-full bg-rose-50 dark:bg-rose-900/20 text-rose-600 dark:text-rose-300 flex items-center justify-center"
+                      >
+                        <i className="fas fa-trash text-sm"></i>
+                      </button>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="w-12" />
+              )}
+            </div>
+
+            <div className="text-center mb-8">
+              {(() => {
+                const detailItems = normalizeTransactionItems(isViewEditMode && detailDraft ? detailDraft : viewingTransaction);
+                const isMultiItem = detailItems.length > 1;
+                return (
+                  <>
+              <div className="w-20 h-20 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center mx-auto mb-4">
+                <i className="fas fa-receipt text-3xl"></i>
+              </div>
+              {isViewEditMode && detailDraft ? (
+                <input
+                  value={detailDraft.description || ''}
+                  onChange={e => setDetailDraft({ ...detailDraft, description: e.target.value })}
+                  className="w-full max-w-md mx-auto text-center text-xl font-black text-slate-800 dark:text-slate-100 mb-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-2xl px-4 py-2"
+                  disabled={isMultiItem}
+                />
+              ) : (
+                <p className="text-xl font-black text-slate-800 dark:text-slate-100 mb-2">
+                  {viewingTransaction.description || viewingTransaction.categoryId}
+                </p>
+              )}
+              {isViewEditMode && detailDraft && !isMultiItem ? (
+                <input
+                  type="number"
+                  value={detailDraft.amount}
+                  onChange={e => setDetailDraft({ ...detailDraft, amount: Number(e.target.value || 0) })}
+                  className="w-56 text-center text-4xl font-black tracking-tight text-slate-800 dark:text-white bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-2xl px-3 py-2"
+                />
+              ) : (
+                <p className={`text-5xl font-black tracking-tight ${viewingTransaction.type === TransactionType.REVENUE ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-800 dark:text-white'}`}>
+                  {viewingTransaction.type === TransactionType.REVENUE ? '+' : '-'}¥{viewingTransaction.amount.toLocaleString()}
+                </p>
+              )}
+              {isMultiItem && (
+                <p className="mt-3 text-[11px] font-black uppercase tracking-widest text-slate-400 dark:text-slate-500">
+                  {language === 'zh' ? `${detailItems.length} 個服務項目` : `${detailItems.length} service items`}
+                </p>
+              )}
+              <p className="mt-4 text-base font-black text-blue-600 dark:text-blue-400">
+                <i className="fas fa-check-circle mr-2"></i>
+                {language === 'zh' ? '成功' : 'Success'}
+              </p>
+                  </>
+                );
+              })()}
+            </div>
+
+            <div className="bg-white dark:bg-slate-900 rounded-[28px] p-5 border border-slate-200 dark:border-white/10 space-y-4">
+              {(() => {
+                const draftOrView = isViewEditMode && detailDraft ? detailDraft : viewingTransaction;
+                const detailItems = normalizeTransactionItems(draftOrView);
+                const isMultiItem = detailItems.length > 1;
+                return (
+                  <>
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <p className="font-black text-slate-700 dark:text-slate-300">{language === 'zh' ? '交易類型' : 'Type'}</p>
+                {isViewEditMode && detailDraft ? (
+                  <select
+                    value={detailDraft.type}
+                    onChange={e => setDetailDraft({ ...detailDraft, type: e.target.value as TransactionType })}
+                    className="text-right font-semibold text-slate-500 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-lg px-2 py-1"
+                  >
+                    <option value={TransactionType.REVENUE}>{t.revenue}</option>
+                    <option value={TransactionType.EXPENSE}>{t.expense}</option>
+                    <option value={TransactionType.STARTUP}>{t.startupCosts}</option>
+                    <option value={TransactionType.WITHDRAWAL}>{t.withdraw}</option>
+                  </select>
+                ) : (
+                  <p className="text-right font-semibold text-slate-500 dark:text-slate-400">{viewingTransaction.type}</p>
+                )}
+
+                <p className="font-black text-slate-700 dark:text-slate-300">{language === 'zh' ? '交易號碼' : 'Transaction Number'}</p>
+                {isViewEditMode && detailDraft ? (
+                  <input
+                    value={detailDraft.receiptNumber}
+                    onChange={e => setDetailDraft({ ...detailDraft, receiptNumber: e.target.value })}
+                    className="text-right font-semibold text-slate-500 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-lg px-2 py-1"
+                  />
+                ) : (
+                  <p className="text-right font-semibold text-slate-500 dark:text-slate-400 break-all">{viewingTransaction.receiptNumber}</p>
+                )}
+
+                <p className="font-black text-slate-700 dark:text-slate-300">{language === 'zh' ? '日期' : 'Date'}</p>
+                {isViewEditMode && detailDraft ? (
+                  <input
+                    type="date"
+                    value={detailDraft.date.slice(0, 10)}
+                    onChange={e => setDetailDraft({ ...detailDraft, date: e.target.value })}
+                    className="text-right font-semibold text-slate-500 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-lg px-2 py-1"
+                  />
+                ) : (
+                  <p className="text-right font-semibold text-slate-500 dark:text-slate-400">{viewingTransaction.date}</p>
+                )}
+
+                <p className="font-black text-slate-700 dark:text-slate-300">{language === 'zh' ? '分類' : 'Category'}</p>
+                {isViewEditMode && detailDraft && !isMultiItem ? (
+                  <select
+                    value={detailDraft.categoryId}
+                    onChange={e => setDetailDraft({ ...detailDraft, categoryId: e.target.value })}
+                    className="text-right font-semibold text-slate-500 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-lg px-2 py-1"
+                  >
+                    {editCategories.map(category => (
+                      <option key={category.id} value={category.id}>{category.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-right font-semibold text-slate-500 dark:text-slate-400">{isMultiItem ? (language === 'zh' ? '多服務' : 'Multiple Services') : (categories.find(c => c.id === viewingTransaction.categoryId)?.name || viewingTransaction.categoryId)}</p>
+                )}
+
+                <p className="font-black text-slate-700 dark:text-slate-300">{language === 'zh' ? '客戶' : 'Customer'}</p>
+                {isViewEditMode && detailDraft ? (
+                  <select
+                    value={detailDraft.customerId || ''}
+                    onChange={e => setDetailDraft({ ...detailDraft, customerId: e.target.value || undefined })}
+                    className="text-right font-semibold text-slate-500 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-lg px-2 py-1"
+                  >
+                    <option value="">{language === 'zh' ? '未綁定' : 'None'}</option>
+                    {customers.map(customer => (
+                      <option key={customer.id} value={customer.id}>{customer.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-right font-semibold text-slate-500 dark:text-slate-400">{viewingTransaction.customerId ? (customerById.get(viewingTransaction.customerId)?.name || viewingTransaction.customerId) : (language === 'zh' ? '未綁定' : 'None')}</p>
+                )}
+
+                <p className="font-black text-slate-700 dark:text-slate-300">{language === 'zh' ? '取錢帳戶' : 'From Account'}</p>
+                {isViewEditMode && detailDraft ? (
+                  <select
+                    value={detailDraft.fromAccountId || ''}
+                    onChange={e => setDetailDraft({ ...detailDraft, fromAccountId: e.target.value || undefined })}
+                    className="text-right font-semibold text-slate-500 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-lg px-2 py-1"
+                  >
+                    <option value="">{language === 'zh' ? '無' : 'None'}</option>
+                    {normalizedAccounts.map(account => (
+                      <option key={account.id} value={account.id}>{account.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-right font-semibold text-slate-500 dark:text-slate-400">{viewingTransaction.fromAccountId ? getAccountName(viewingTransaction.fromAccountId) : (language === 'zh' ? '無' : 'None')}</p>
+                )}
+
+                <p className="font-black text-slate-700 dark:text-slate-300">{language === 'zh' ? '入錢帳戶' : 'To Account'}</p>
+                {isViewEditMode && detailDraft ? (
+                  <select
+                    value={detailDraft.toAccountId || ''}
+                    onChange={e => setDetailDraft({ ...detailDraft, toAccountId: e.target.value || undefined })}
+                    className="text-right font-semibold text-slate-500 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-lg px-2 py-1"
+                  >
+                    <option value="">{language === 'zh' ? '無' : 'None'}</option>
+                    {normalizedAccounts.map(account => (
+                      <option key={account.id} value={account.id}>{account.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-right font-semibold text-slate-500 dark:text-slate-400">{viewingTransaction.toAccountId ? getAccountName(viewingTransaction.toAccountId) : (language === 'zh' ? '無' : 'None')}</p>
+                )}
+
+                <p className="font-black text-slate-700 dark:text-slate-300">{language === 'zh' ? '歸屬' : 'Contributed By'}</p>
+                {isViewEditMode && detailDraft && !isSplitTransaction(detailDraft) ? (
+                  <select
+                    value={detailDraft.contributedBy || ''}
+                    onChange={e => setDetailDraft({ ...detailDraft, contributedBy: e.target.value })}
+                    className="text-right font-semibold text-slate-500 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-lg px-2 py-1"
+                  >
+                    {normalizedAccounts.map(account => (
+                      <option key={account.id} value={account.id}>{account.id}</option>
+                    ))}
+                  </select>
+                ) : isViewEditMode && detailDraft ? (
+                  <p className="text-right font-semibold text-indigo-600 dark:text-indigo-400">{getContributorLabel(detailDraft)}</p>
+                ) : (
+                  <p className="text-right font-semibold text-slate-500 dark:text-slate-400">{getContributorLabel(viewingTransaction)}</p>
+                )}
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 dark:border-white/10 space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400 dark:text-slate-500">{language === 'zh' ? '服務明細' : 'Service Breakdown'}</p>
+                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400 dark:text-slate-500">{detailItems.length}</p>
+                </div>
+                {detailItems.map((item, index) => (
+                  <div key={`${item.categoryId}-${index}`} className="rounded-2xl bg-slate-50 dark:bg-white/5 px-4 py-3 flex items-start justify-between gap-4">
+                    <div>
+                      <p className="font-black text-slate-700 dark:text-slate-200">{item.name}</p>
+                      <p className="text-xs font-semibold text-slate-400 dark:text-slate-500 mt-1">{categories.find(c => c.id === item.categoryId)?.name || item.categoryId}</p>
+                      {item.notes && <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mt-2">{item.notes}</p>}
+                    </div>
+                    <p className="text-sm font-black text-slate-700 dark:text-slate-100">¥{item.price.toLocaleString()}</p>
+                  </div>
+                ))}
+              </div>
+
+              {(viewingTransaction.notes || viewingTransaction.description || isViewEditMode) && (
+                <div className="pt-3 border-t border-slate-100 dark:border-white/10">
+                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-2">{language === 'zh' ? '備註 / 說明' : 'Notes / Description'}</p>
+                  {isViewEditMode && detailDraft ? (
+                    <textarea
+                      rows={3}
+                      value={detailDraft.notes || ''}
+                      onChange={e => setDetailDraft({ ...detailDraft, notes: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-semibold text-slate-700 dark:text-slate-300 dark:bg-slate-800 dark:border-white/10"
+                    />
+                  ) : (
+                    <p className="text-sm font-semibold text-slate-600 dark:text-slate-300 whitespace-pre-wrap">{viewingTransaction.notes || viewingTransaction.description}</p>
+                  )}
+                </div>
+              )}
+
+              {(viewingTransaction.imageUrl || isViewEditMode) && (
+                <div className="pt-3 border-t border-slate-100 dark:border-white/10">
+                  <p className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-2">{language === 'zh' ? '收據照片' : 'Receipt Photo'}</p>
+                  {isViewEditMode && detailDraft ? (
+                    <div className="space-y-3">
+                      <button
+                        type="button"
+                        onClick={() => editPhotoRef.current?.click()}
+                        className="w-full py-3 px-4 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-black uppercase text-slate-700 dark:text-slate-300 dark:bg-slate-800 dark:border-white/10"
+                      >
+                        {detailDraft.imageUrl ? t.changePhoto : t.uploadPhoto}
+                      </button>
+                      <input type="file" ref={editPhotoRef} onChange={handleEditPhoto} accept="image/*" className="hidden" />
+                      {detailDraft.imageUrl && (
+                        <img src={detailDraft.imageUrl} className="w-full max-h-72 object-cover rounded-2xl border border-slate-200 dark:border-white/10" />
+                      )}
+                    </div>
+                  ) : (
+                    viewingTransaction.imageUrl && <img src={viewingTransaction.imageUrl} className="w-full max-h-72 object-cover rounded-2xl border border-slate-200 dark:border-white/10" />
+                  )}
+                </div>
+              )}
+                  </>
+                );
+              })()}
+            </div>
+
+            <div className="mt-6 bg-white dark:bg-slate-900 rounded-[28px] p-5 border border-slate-200 dark:border-white/10 text-center">
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-4">{language === 'zh' ? '掃描以打開交易' : 'Scan to open transaction'}</p>
+              {transactionQrDataUrl ? (
+                <img src={transactionQrDataUrl} alt="transaction-qr" className="w-56 h-56 mx-auto" />
+              ) : (
+                <div className="w-56 h-56 mx-auto rounded-2xl bg-slate-100 dark:bg-white/5 animate-pulse" />
+              )}
+              <p className="mt-3 text-xs font-bold text-slate-500 break-all">app://transaction/{viewingTransaction.receiptNumber}</p>
             </div>
           </div>
         </div>

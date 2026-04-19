@@ -41,9 +41,21 @@ const AuditLogList: React.FC<AuditLogListProps> = ({ logs, language }) => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {logs.map((log) => (
-          <div 
-            key={log.id} 
+        {logs.map((log) => {
+          const payload = (log.newData ?? log.oldData ?? {}) as Record<string, any>;
+          const legacyPayload = (log as any).data as Record<string, any> | undefined;
+          const categoryId = payload.categoryId ?? legacyPayload?.categoryId ?? '-';
+          const amountValueRaw = payload.amount ?? legacyPayload?.amount;
+          const amountValue = typeof amountValueRaw === 'number' ? amountValueRaw : Number(amountValueRaw);
+          const hasAmount = Number.isFinite(amountValue);
+          const contributor = payload.contributedBy ?? legacyPayload?.contributedBy ?? log.changedBy ?? '-';
+          const description = payload.description ?? legacyPayload?.description;
+          const logTime = log.createdAt || (log as any).timestamp || '-';
+          const transactionId = log.recordId || (log as any).transactionId || '-';
+
+          return (
+          <div
+            key={log.id}
             className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/5 rounded-3xl p-5 shadow-sm hover:shadow-md transition-all group"
           >
             <div className="flex items-center justify-between mb-4">
@@ -52,7 +64,7 @@ const AuditLogList: React.FC<AuditLogListProps> = ({ logs, language }) => {
                 {log.action}
               </span>
               <span className="text-[10px] font-mono text-slate-400 dark:text-slate-300">
-                {log.timestamp}
+                {logTime}
               </span>
             </div>
 
@@ -62,7 +74,7 @@ const AuditLogList: React.FC<AuditLogListProps> = ({ logs, language }) => {
                   {language === 'zh' ? '交易 ID' : 'Transaction ID'}
                 </span>
                 <span className="text-xs font-mono text-slate-900 dark:text-white truncate max-w-[120px]">
-                  {log.transactionId}
+                  {transactionId}
                 </span>
               </div>
 
@@ -72,15 +84,15 @@ const AuditLogList: React.FC<AuditLogListProps> = ({ logs, language }) => {
                     {language === 'zh' ? '類別' : 'Category'}
                   </span>
                   <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                    {log.data.categoryId}
+                    {categoryId}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest">
                     {language === 'zh' ? '金額' : 'Amount'}
                   </span>
-                  <span className={`text-xs font-black ${log.data.amount >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                    ${Math.abs(log.data.amount).toLocaleString()}
+                  <span className={`text-xs font-black ${hasAmount && amountValue >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {hasAmount ? `$${Math.abs(amountValue).toLocaleString()}` : '-'}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
@@ -88,19 +100,19 @@ const AuditLogList: React.FC<AuditLogListProps> = ({ logs, language }) => {
                     {language === 'zh' ? '經手人' : 'By'}
                   </span>
                   <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                    {log.data.contributedBy}
+                    {contributor}
                   </span>
                 </div>
               </div>
 
-              {log.data.description && (
+              {description && (
                 <p className="text-[11px] text-slate-500 dark:text-slate-400 italic line-clamp-2">
-                  "{log.data.description}"
+                  "{description}"
                 </p>
               )}
             </div>
           </div>
-        ))}
+        )})}
 
         {logs.length === 0 && (
           <div className="col-span-full py-20 text-center">

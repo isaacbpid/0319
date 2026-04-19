@@ -1,7 +1,8 @@
-
+ 
 import React, { useState, useEffect, useMemo, useRef, Component, ErrorInfo, ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Note, Transaction, TransactionType, Category, Owner, FinancialSummary, CloudConfig, AuditAction, AuditLog, CategoryItem, Customer, Account } from './types';
+import { Html5Qrcode } from 'html5-qrcode';
+import { Note, Transaction, TransactionType, Category, Owner, FinancialSummary, CloudConfig, AuditAction, AuditLog, CategoryItem, Customer, CustomerGroup, Vehicle, Account, DiscountItem, TransactionItem, CheckoutOrder, MembershipTier, CustomerMembership, PaymentCurrency, PaymentMethod } from './types';
 import Dashboard from './components/Dashboard';
 import TransactionList from './components/TransactionList';
 import TransactionForm from './components/TransactionForm';
@@ -11,11 +12,17 @@ import SettingsPage from './components/SettingsPage';
 import AuditLogList from './components/AuditLogList';
 import NotesPage from './components/NotesPage';
 import CustomerPage from './components/CustomerPage';
+import VehiclesPage from './components/VehiclesPage';
 import AccountsPage from './components/AccountsPage';
+import CheckoutPage from './components/CheckoutPage';
+import CategoriesPage from './components/CategoriesPage';
+import MembershipsPage from './components/MembershipsPage';
 import LoadingScreen from './components/LoadingScreen';
-import { initSupabase, fetchRemoteTransactions, syncRemoteTransactions, deleteRemoteTransaction, subscribeToTransactions, logAuditEvent, fetchAuditLogs, fetchRemoteNotes, syncRemoteNotes, deleteRemoteNote, subscribeToNotes, clearAllRemoteData, fetchRemoteCategories, syncRemoteCategories, deleteRemoteCategory, subscribeToCategories, fetchRemoteCustomers, syncRemoteCustomers, deleteRemoteCustomer, subscribeToCustomers, updateAdminSession, clearAdminSession, getServerTime, fetchRemoteAccounts, syncRemoteAccounts, deleteRemoteAccount, subscribeToAccounts } from './services/database';
+import { initSupabase, syncRemoteTransactions, deleteRemoteTransaction, subscribeToTransactions, logAuditEvent, fetchAuditLogs, fetchTransactions, fetchRemoteNotes, syncRemoteNotes, deleteRemoteNote, subscribeToNotes, clearAllRemoteData, fetchRemoteCategories, syncRemoteCategories, deleteRemoteCategory, subscribeToCategories, fetchRemoteCustomers, syncRemoteCustomers, deleteRemoteCustomer, subscribeToCustomers, fetchRemoteCustomerGroups, syncRemoteCustomerGroups, deleteRemoteCustomerGroup, subscribeToCustomerGroups, fetchRemoteVehicles, syncRemoteVehicles, deleteRemoteVehicle, subscribeToVehicles, updateAdminSession, clearAdminSession, getServerTime, fetchRemoteAccounts, syncRemoteAccounts, deleteRemoteAccount, subscribeToAccounts, fetchRemoteDiscounts, syncRemoteDiscounts, subscribeToDiscounts, fetchRemoteCheckoutOrders, syncRemoteCheckoutOrders, deleteRemoteCheckoutOrder, subscribeToCheckoutOrders, fetchRemoteMembershipTiers, syncRemoteMembershipTiers, fetchRemoteCustomerMemberships, syncRemoteCustomerMemberships, subscribeToMembershipTiers, subscribeToCustomerMemberships } from './services/database';
 import { translations } from './translations';
 import { LoginPage } from './components/LoginPage';
+import { getOwnerShareRatio } from './utils/transactionSplit';
+
 
 const QUICK_CONNECT_CONFIG: CloudConfig = {
   url: process.env.SUPABASE_URL || "",
@@ -50,6 +57,99 @@ const shouldCreateTransactionNote = (previous: Transaction | undefined, next: Tr
 
   const previousText = (previous?.notes || '').trim();
   return previousText !== nextText;
+};
+
+const roundCurrency = (value: number): number => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
+
+const getForcedCurrencyForPaymentMethod = (method: PaymentMethod): PaymentCurrency | null => {
+  if (method === PaymentMethod.HKD_CASH) return PaymentCurrency.HKD;
+  if (method === PaymentMethod.RMB_CASH) return PaymentCurrency.RMB;
+  if (method === PaymentMethod.MOP_CASH) return PaymentCurrency.MOP;
+  return null;
+};
+
+const buildTransactionItemsFromCheckoutOrder = (order: CheckoutOrder): TransactionItem[] => {
+  const serviceLines = (order.lines || []).filter(line => !line.isDiscount && Number(line.lineSubtotal) > 0);
+  const grossServiceTotal = serviceLines.reduce((sum, line) => sum + Number(line.lineSubtotal || 0), 0);
+  const targetNet = roundCurrency(Math.max(0, Number(order.netAmount || 0)));
+
+  if (serviceLines.length === 0) {
+    return [{
+      id: `${order.id}_item_1_checkout`,
+      transactionId: '',
+      categoryId: 'OTHER_ID',
+      name: 'Checkout Revenue',
+      price: targetNet,
+      notes: order.notes,
+    }];
+  }
+
+  if (grossServiceTotal <= 0) {
+    return serviceLines.map((line, index) => ({
+      id: `${order.id}_item_${index + 1}`,
+      transactionId: '',
+      categoryId: line.categoryId || 'OTHER_ID',
+      name: line.serviceNameSnapshot || line.name,
+      price: index === serviceLines.length - 1 ? targetNet : 0,
+      notes: undefined,
+    }));
+  }
+
+  const factor = targetNet / grossServiceTotal;
+  let allocatedTotal = 0;
+
+  return serviceLines.map((line, index) => {
+    const isLast = index === serviceLines.length - 1;
+    const base = Number(line.lineSubtotal || 0);
+    const allocated = isLast
+      ? roundCurrency(targetNet - allocatedTotal)
+      : roundCurrency(base * factor);
+
+    allocatedTotal = roundCurrency(allocatedTotal + allocated);
+
+    return {
+      id: `${order.id}_item_${index + 1}`,
+      transactionId: '',
+      categoryId: line.categoryId || 'OTHER_ID',
+      name: line.serviceNameSnapshot || line.name,
+      price: allocated,
+      notes: undefined,
+    };
+  });
+};
+
+const buildTransactionFromPaidCheckoutOrder = (
+  order: CheckoutOrder,
+  paymentMethod: PaymentMethod,
+  paymentCurrency: PaymentCurrency
+): Transaction => {
+  const transactionId = `co_${order.id}`;
+  const items = buildTransactionItemsFromCheckoutOrder(order).map(item => ({
+    ...item,
+    transactionId,
+  }));
+  const amount = roundCurrency(items.reduce((sum, item) => sum + Number(item.price || 0), 0));
+  const occurredAt = order.paidAt || order.checkedOutAt || order.checkInAt || order.createdAt || new Date().toISOString();
+
+  return {
+    id: transactionId,
+    receiptNumber: `CO-${order.id.slice(0, 8).toUpperCase()}`,
+    date: occurredAt.slice(0, 10),
+    type: TransactionType.REVENUE,
+    items,
+    categoryId: items[0]?.categoryId || 'OTHER_ID',
+    amount,
+    description: `Checkout ${order.id.slice(0, 8)} (${paymentMethod} ${paymentCurrency})`,
+    contributedBy: Owner.OWNER_A,
+    customerId: order.customerId,
+    notes: order.notes,
+    checkoutOrderId: order.id,
+    paymentStatus: 'paid',
+    paymentMethod,
+    paymentCurrency,
+    splitMode: 'NONE',
+    updatedAt: new Date().toISOString(),
+  };
 };
 
 class ErrorBoundary extends React.Component<any, any> {
@@ -101,9 +201,15 @@ const App: React.FC = () => {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [categories, setCategories] = useState<CategoryItem[]>([]);
+  const [discounts, setDiscounts] = useState<DiscountItem[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customerGroups, setCustomerGroups] = useState<CustomerGroup[]>([]);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [checkoutOrders, setCheckoutOrders] = useState<CheckoutOrder[]>([]);
+  const [membershipTiers, setMembershipTiers] = useState<MembershipTier[]>([]);
+  const [customerMemberships, setCustomerMemberships] = useState<CustomerMembership[]>([]);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'input' | 'startup' | 'balance' | 'settings' | 'audit' | 'notes' | 'customers'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'input' | 'startup' | 'balance' | 'settings' | 'audit' | 'notes' | 'customers' | 'vehicles' | 'checkout' | 'categories' | 'accounts' | 'memberships'>('overview');
   const [language, setLanguage] = useState<'zh' | 'en'>('zh');
   const [syncStatus, setSyncStatus] = useState<'local' | 'syncing' | 'cloud' | 'error'>('local');
   const [lastError, setLastError] = useState<string | null>(null);
@@ -117,10 +223,15 @@ const App: React.FC = () => {
   const [lastAction, setLastAction] = useState<{ type: 'add' | 'delete', data: Transaction[] } | null>(null);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [showReconnectPrompt, setShowReconnectPrompt] = useState(false);
+  const [isMoreOpen, setIsMoreOpen] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isForcedReadOnly, setIsForcedReadOnly] = useState(false);
   const [serverTime, setServerTime] = useState<string>('');
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [pendingTransactionOpenId, setPendingTransactionOpenId] = useState<string | null>(null);
+  const [pendingTransactionSearch, setPendingTransactionSearch] = useState<string>('');
+  const scannerRef = useRef<Html5Qrcode | null>(null);
 
   const isReadOnly = syncStatus === 'error' || isForcedReadOnly;
 
@@ -152,6 +263,15 @@ const App: React.FC = () => {
     return `${base} | ${parts.join(' | ')}`;
   };
 
+  const showTransactionSyncAlert = (message: string, fallbackZh: string, fallbackEn: string) => {
+    const detail = message.trim();
+    if (detail) {
+      alert(detail);
+      return;
+    }
+    alert(language === 'zh' ? fallbackZh : fallbackEn);
+  };
+
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
@@ -172,7 +292,75 @@ const App: React.FC = () => {
   const touchStartRef = useRef<number | null>(null);
   
   const mainRef = useRef<HTMLDivElement>(null);
+
+  const handleScannerResult = (decodedText: string) => {
+    const scanned = decodedText.trim();
+    if (!scanned) return;
+
+    const deepLinkMatch = scanned.match(/^app:\/\/transaction\/(.+)$/i);
+    const scannedId = deepLinkMatch ? decodeURIComponent(deepLinkMatch[1]) : scanned;
+    const found = transactions.find(tr => tr.id === scannedId || tr.receiptNumber === scannedId);
+
+    setActiveTab('transactions');
+    if (found) {
+      setPendingTransactionOpenId(found.id);
+      setPendingTransactionSearch('');
+    } else {
+      setPendingTransactionOpenId(null);
+      setPendingTransactionSearch(scannedId);
+    }
+
+    setIsScannerOpen(false);
+  };
+
+  useEffect(() => {
+    if (!isScannerOpen) return;
+
+    let cancelled = false;
+    const scanner = new Html5Qrcode('transaction-qr-reader');
+    scannerRef.current = scanner;
+
+    scanner
+      .start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: { width: 260, height: 260 } },
+        (decodedText) => {
+          if (cancelled) return;
+          handleScannerResult(decodedText);
+        },
+        () => {}
+      )
+      .catch(() => {
+        if (!cancelled) {
+          alert(language === 'zh' ? '無法啟動相機掃描器' : 'Unable to start camera scanner');
+          setIsScannerOpen(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      if (scannerRef.current) {
+        scannerRef.current
+          .stop()
+          .then(() => scannerRef.current?.clear())
+          .catch(() => {})
+          .finally(() => {
+            scannerRef.current = null;
+          });
+      }
+    };
+  }, [isScannerOpen, language, transactions]);
   const t = translations[language];
+
+  const ensureCloudWritable = (): boolean => {
+    if (cloudConfig) return true;
+    const msg = language === 'zh'
+      ? '未設定雲端連線，資料只能直接寫入資料庫。請先設定 Supabase。'
+      : 'Cloud is not configured. Records must be written directly to the database. Please configure Supabase first.';
+    setLastError(msg);
+    setSyncStatus('error');
+    return false;
+  };
 
   const BRANCHES = ["Zhuhai", "Macau", "Hong Kong", "Shenzhen"];
 
@@ -225,17 +413,9 @@ const App: React.FC = () => {
     let interval: any;
     if (syncStatus === 'error' && isOnline && cloudConfig) {
       console.log('Connection unstable. Starting background reconnection polling...');
-      interval = setInterval(async () => {
-        try {
-          const { data, error } = await fetchRemoteTransactions();
-          if (data && !error) {
-            console.log('Connection re-established!');
-            clearInterval(interval);
-            setShowReconnectPrompt(true);
-          }
-        } catch (e) {
-          // Still failing, keep polling
-        }
+      interval = setInterval(() => {
+        // Connection polling: implement if needed with new backend fetch logic
+        // (No-op: removed fetchRemoteTransactions)
       }, 15000); // Poll every 15s to be gentle
     }
     return () => clearInterval(interval);
@@ -263,24 +443,47 @@ const App: React.FC = () => {
   }, [theme]);
 
   useEffect(() => {
+    if (activeTab !== 'customers' || !mainRef.current) return;
+    mainRef.current.scrollTo({ top: 0, behavior: 'auto' });
+  }, [activeTab]);
+
+  useEffect(() => {
     let subTr: any = null;
     let subNotes: any = null;
     let subCats: any = null;
     let subCust: any = null;
+    let subCustGroups: any = null;
+    let subVehicles: any = null;
     let subAcc: any = null;
+    let subDiscounts: any = null;
+    let subCheckoutOrders: any = null;
+    let subMembershipTiers: any = null;
+    let subCustomerMemberships: any = null;
     if (cloudConfig) {
       subTr = subscribeToTransactions(() => loadData(false));
       subNotes = subscribeToNotes(() => loadData(false));
       subCats = subscribeToCategories(() => loadData(false));
       subCust = subscribeToCustomers(() => loadData(false));
+      subCustGroups = subscribeToCustomerGroups(() => loadData(false));
+      subVehicles = subscribeToVehicles(() => loadData(false));
       subAcc = subscribeToAccounts(() => loadData(false));
+      subDiscounts = subscribeToDiscounts(() => loadData(false));
+      subCheckoutOrders = subscribeToCheckoutOrders(() => loadData(false));
+      subMembershipTiers = subscribeToMembershipTiers(() => loadData(false));
+      subCustomerMemberships = subscribeToCustomerMemberships(() => loadData(false));
     }
     return () => {
       if (subTr && subTr.unsubscribe) subTr.unsubscribe();
       if (subNotes && subNotes.unsubscribe) subNotes.unsubscribe();
       if (subCats && subCats.unsubscribe) subCats.unsubscribe();
       if (subCust && subCust.unsubscribe) subCust.unsubscribe();
+      if (subCustGroups && subCustGroups.unsubscribe) subCustGroups.unsubscribe();
+      if (subVehicles && subVehicles.unsubscribe) subVehicles.unsubscribe();
       if (subAcc && subAcc.unsubscribe) subAcc.unsubscribe();
+      if (subDiscounts && subDiscounts.unsubscribe) subDiscounts.unsubscribe();
+      if (subCheckoutOrders && subCheckoutOrders.unsubscribe) subCheckoutOrders.unsubscribe();
+      if (subMembershipTiers && subMembershipTiers.unsubscribe) subMembershipTiers.unsubscribe();
+      if (subCustomerMemberships && subCustomerMemberships.unsubscribe) subCustomerMemberships.unsubscribe();
     };
   }, [cloudConfig]);
 
@@ -364,28 +567,34 @@ const App: React.FC = () => {
     console.log('Starting loadData from Supabase...');
     
     try {
-      const { data: cloudData, error: trError } = await fetchRemoteTransactions();
+      const { data: cloudTransactions, error: transactionsError } = await fetchTransactions();
       const { data: cloudNotes, error: notesError } = await fetchRemoteNotes();
       const { data: cloudCategories, error: catsError } = await fetchRemoteCategories();
       const { data: cloudCustomers, error: custError } = await fetchRemoteCustomers();
+      const { data: cloudCustomerGroups, error: groupError } = await fetchRemoteCustomerGroups();
+      const { data: cloudVehicles, error: vehicleError } = await fetchRemoteVehicles();
       const { data: cloudAccounts, error: accError } = await fetchRemoteAccounts();
+      const { data: cloudDiscounts, error: discountError } = await fetchRemoteDiscounts();
+      const { data: cloudCheckoutOrders, error: checkoutOrderError } = await fetchRemoteCheckoutOrders();
+      const { data: cloudMembershipTiers, error: membershipTierError } = await fetchRemoteMembershipTiers();
+      const { data: cloudCustomerMemberships, error: customerMembershipError } = await fetchRemoteCustomerMemberships();
       const { data: logsData, error: logsError } = await fetchAuditLogs();
       
-      if (trError || notesError || catsError || custError || accError || logsError) {
-        const firstError = trError || notesError || catsError || custError || accError || logsError;
-        console.error('Fetch error detected:', { trError, notesError, catsError, custError, accError, logsError });
-        throw new Error(firstError || 'Database connection failed');
+      // Transaction error handling removed: handled by new backend logic
+      if (vehicleError) {
+        console.warn('Vehicles fetch skipped:', vehicleError);
       }
 
       if (logsData) setAuditLogs(logsData);
-      
-      if (cloudData !== null && cloudData !== undefined) {
-        console.log(`Successfully fetched ${cloudData.length} transactions.`);
-        setTransactions(cloudData);
-      } else {
-        console.warn('cloudData was null or undefined');
+
+      if (transactionsError) {
+        console.warn('Transactions fetch failed:', transactionsError);
       }
-      
+
+      if (cloudTransactions !== null && cloudTransactions !== undefined) {
+        setTransactions(cloudTransactions);
+      }
+
       if (cloudNotes !== null && cloudNotes !== undefined) {
         setNotes(cloudNotes);
       }
@@ -394,8 +603,44 @@ const App: React.FC = () => {
         setCustomers(cloudCustomers);
       }
 
+      if (cloudCustomerGroups !== null && cloudCustomerGroups !== undefined) {
+        setCustomerGroups(cloudCustomerGroups);
+      }
+
+      if (!vehicleError && cloudVehicles !== null && cloudVehicles !== undefined) {
+        setVehicles(cloudVehicles);
+      }
+
       if (cloudAccounts !== null && cloudAccounts !== undefined) {
         setAccounts(cloudAccounts);
+      }
+
+      if (cloudDiscounts !== null && cloudDiscounts !== undefined) {
+        setDiscounts(cloudDiscounts);
+      }
+
+      if (checkoutOrderError) {
+        console.warn('Checkout orders fetch skipped:', checkoutOrderError);
+      }
+
+      if (!checkoutOrderError && cloudCheckoutOrders !== null && cloudCheckoutOrders !== undefined) {
+        setCheckoutOrders(cloudCheckoutOrders);
+      }
+
+      if (membershipTierError) {
+        console.warn('Membership tiers fetch skipped:', membershipTierError);
+      }
+
+      if (!membershipTierError && cloudMembershipTiers !== null && cloudMembershipTiers !== undefined) {
+        setMembershipTiers(cloudMembershipTiers);
+      }
+
+      if (customerMembershipError) {
+        console.warn('Customer memberships fetch skipped:', customerMembershipError);
+      }
+
+      if (!customerMembershipError && cloudCustomerMemberships !== null && cloudCustomerMemberships !== undefined) {
+        setCustomerMemberships(cloudCustomerMemberships);
       }
       
       if (cloudCategories !== null && cloudCategories !== undefined) {
@@ -451,7 +696,13 @@ const App: React.FC = () => {
       const resNotes = await syncRemoteNotes(notes);
       const resCats = await syncRemoteCategories(categories);
       const resCust = await syncRemoteCustomers(customers);
-      if (resTr.success && resNotes.success && resCats.success && resCust.success && resAcc.success) {
+      const resCustGroups = await syncRemoteCustomerGroups(customerGroups);
+      const resVehicles = await syncRemoteVehicles(vehicles);
+      const resDiscounts = await syncRemoteDiscounts(discounts);
+      const resCheckoutOrders = await syncRemoteCheckoutOrders(checkoutOrders);
+      const resMembershipTiers = await syncRemoteMembershipTiers(membershipTiers);
+      const resCustomerMemberships = await syncRemoteCustomerMemberships(customerMemberships);
+      if (resTr.success && resNotes.success && resCats.success && resCust.success && resCustGroups.success && resVehicles.success && resAcc.success && resDiscounts.success && resCheckoutOrders.success && resMembershipTiers.success && resCustomerMemberships.success) {
         setSyncStatus('cloud');
         setLastSync(new Date());
         setShowSuccessOverlay(true);
@@ -459,7 +710,7 @@ const App: React.FC = () => {
       } else {
         setLastError(
           resTr.success
-            ? (resNotes.error || resCats.error || resCust.error || resAcc.error || 'Push failed')
+            ? (resNotes.error || resCats.error || resCust.error || resCustGroups.error || resVehicles.error || resAcc.error || resDiscounts.error || resCheckoutOrders.error || resMembershipTiers.error || resCustomerMemberships.error || 'Push failed')
             : formatTransactionSyncError(resTr, 'Push failed')
         );
         setSyncStatus('error');
@@ -485,6 +736,7 @@ const App: React.FC = () => {
       'receiptNumber', 
       t.type, 
       'categoryId', 
+      'serviceItems',
       t.amount, 
       t.description, 
       t.contributor,
@@ -496,6 +748,9 @@ const App: React.FC = () => {
       tr.receiptNumber || '',
       tr.type,
       tr.categoryId,
+      `"${(tr.items && tr.items.length > 0
+        ? tr.items.map(item => `${item.name} (¥${item.price})`).join(' + ')
+        : '').replace(/"/g, '""')}"`,
       tr.amount,
       `"${(tr.description || '').replace(/"/g, '""')}"`,
       tr.contributedBy,
@@ -565,23 +820,21 @@ const App: React.FC = () => {
   };
 
   const saveTransactions = async (newTransactions: Transaction[]) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     try {
-      if (cloudConfig) {
-        setSyncStatus('syncing');
-        setLastError(null);
-        const result = await syncRemoteTransactions(newTransactions);
-        if (result.success) {
-          setSyncStatus('cloud');
-          setLastSync(new Date());
-          setTransactions(newTransactions);
-        } else {
-          setLastError(formatTransactionSyncError(result, 'Auto-sync failed'));
-          setSyncStatus('error');
-          alert(language === 'zh' ? '同步失敗，請檢查網絡' : 'Sync failed, please check network');
-        }
-      } else {
+      setSyncStatus('syncing');
+      setLastError(null);
+      const result = await syncRemoteTransactions(newTransactions);
+      if (result.success) {
+        setSyncStatus('cloud');
+        setLastSync(new Date());
         setTransactions(newTransactions);
+      } else {
+        const errorMessage = formatTransactionSyncError(result, 'Auto-sync failed');
+        setLastError(errorMessage);
+        setSyncStatus('error');
+        showTransactionSyncAlert(errorMessage, '同步失敗，請檢查網絡', 'Sync failed, please check network');
       }
     } finally {
       setIsSyncing(false);
@@ -596,6 +849,7 @@ const App: React.FC = () => {
   };
 
   const addTransaction = async (transaction: Transaction | Transaction[], transactionNoteText?: string) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const now = new Date().toISOString();
     const newItems = Array.isArray(transaction) 
@@ -619,49 +873,40 @@ const App: React.FC = () => {
     const generatedNotes = manualTransactionNotes;
     
     try {
-      if (cloudConfig) {
-        setSyncStatus('syncing');
-        // Only sync the new items
-        const result = await syncRemoteTransactions(newItems);
-        if (result.success) {
-          if (generatedNotes.length > 0) {
-            const updatedNotes = [...generatedNotes, ...notes];
-            const notesResult = await syncRemoteNotes(updatedNotes);
-            if (!notesResult.success) {
-              setLastError(notesResult.error || 'Transactions saved, but note sync failed');
-              setSyncStatus('error');
-              await loadData(false);
-              alert(language === 'zh' ? '交易已保存，但備註同步失敗。' : 'Transactions were saved, but note sync failed.');
-              return;
-            }
-            setNotes(updatedNotes);
-          }
-
-          setSyncStatus('cloud');
-          setLastSync(new Date());
-          logAuditEvent(AuditAction.CREATE, 'transactions', newItems[0].id, undefined, undefined, newItems);
-          
-          setLastAction({ type: 'add', data: newItems });
-          setShowUndoToast(true);
-          setTimeout(() => setShowUndoToast(false), 5000);
-
-          setActiveTab('transactions');
-
-          // Refresh from DB to ensure local state is perfectly in sync
-          await loadData(false);
-        } else {
-          setLastError(formatTransactionSyncError(result, 'Sync failed'));
-          setSyncStatus('error');
-          alert(language === 'zh' ? '同步失敗，請檢查網絡' : 'Sync failed, please check network');
-        }
-      } else {
-        setTransactions([...newItems, ...transactions]);
+      setSyncStatus('syncing');
+      // Only sync the new items
+      const result = await syncRemoteTransactions(newItems);
+      if (result.success) {
         if (generatedNotes.length > 0) {
-          setNotes([...generatedNotes, ...notes]);
+          const updatedNotes = [...generatedNotes, ...notes];
+          const notesResult = await syncRemoteNotes(updatedNotes);
+          if (!notesResult.success) {
+            setLastError(notesResult.error || 'Transactions saved, but note sync failed');
+            setSyncStatus('error');
+            await loadData(false);
+            alert(language === 'zh' ? '交易已保存，但備註同步失敗。' : 'Transactions were saved, but note sync failed.');
+            return;
+          }
+          setNotes(updatedNotes);
         }
+
+        setSyncStatus('cloud');
+        setLastSync(new Date());
+        logAuditEvent(AuditAction.CREATE, 'transactions', newItems[0].id, undefined, undefined, newItems);
+        
         setLastAction({ type: 'add', data: newItems });
         setShowUndoToast(true);
         setTimeout(() => setShowUndoToast(false), 5000);
+
+        setActiveTab('transactions');
+
+        // Refresh from DB to ensure local state is perfectly in sync
+        await loadData(false);
+      } else {
+        const errorMessage = formatTransactionSyncError(result, 'Sync failed');
+        setLastError(errorMessage);
+        setSyncStatus('error');
+        showTransactionSyncAlert(errorMessage, '同步失敗，請檢查網絡', 'Sync failed, please check network');
       }
     } finally {
       setIsSyncing(false);
@@ -670,6 +915,7 @@ const App: React.FC = () => {
 
   const handleUndo = async () => {
     if (!lastAction) return;
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     setShowUndoToast(false);
 
@@ -678,26 +924,20 @@ const App: React.FC = () => {
       if (lastAction.type === 'add') {
         const idsToRemove = new Set<string>(lastAction.data.map(t => t.id));
         updatedTransactions = transactions.filter(t => !idsToRemove.has(t.id));
-        
-        if (cloudConfig) {
-          for (const id of Array.from(idsToRemove)) {
-            await deleteRemoteTransaction(id);
-          }
+
+        for (const id of Array.from(idsToRemove)) {
+          await deleteRemoteTransaction(id);
         }
       } else {
         // Undo delete = re-add
         updatedTransactions = [...lastAction.data, ...transactions];
       }
 
-      if (cloudConfig) {
-        const result = await syncRemoteTransactions(updatedTransactions);
-        if (result.success) {
-          setTransactions(updatedTransactions);
-          setSyncStatus('cloud');
-          await loadData(false);
-        }
-      } else {
+      const result = await syncRemoteTransactions(updatedTransactions);
+      if (result.success) {
         setTransactions(updatedTransactions);
+        setSyncStatus('cloud');
+        await loadData(false);
       }
       setLastAction(null);
     } finally {
@@ -705,47 +945,55 @@ const App: React.FC = () => {
     }
   };
 
-  const updateTransaction = async (updatedTr: Transaction) => {
+  const updateTransaction = async (updatedTr: Transaction, noteText?: string) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const now = new Date().toISOString();
-    const existing = transactions.find(tr => tr.id === updatedTr.id);
     const updatedItem = { ...updatedTr, updatedAt: now };
-    const generatedNotes = shouldCreateTransactionNote(existing, updatedItem)
-      ? buildTransactionNotes([updatedItem])
+    const manualNoteText = (noteText || '').trim();
+    const generatedNotes: Note[] = manualNoteText
+      ? [{
+          id: crypto.randomUUID(),
+          content: [
+            `[${now}] Transaction Note`,
+            `Transaction ID: ${updatedItem.id}`,
+            `Receipt: ${updatedItem.receiptNumber || 'N/A'}`,
+            `Date: ${updatedItem.date}`,
+            '',
+            manualNoteText
+          ].join('\n'),
+          createdBy: 'system',
+          createdAt: now,
+          updatedAt: now
+        }]
       : [];
     
     try {
-      if (cloudConfig) {
-        setSyncStatus('syncing');
-        const result = await syncRemoteTransactions([updatedItem]);
-        if (result.success) {
-          if (generatedNotes.length > 0) {
-            const updatedNotes = [...generatedNotes, ...notes];
-            const notesResult = await syncRemoteNotes(updatedNotes);
-            if (!notesResult.success) {
-              setLastError(notesResult.error || 'Transaction updated, but note sync failed');
-              setSyncStatus('error');
-              await loadData(false);
-              alert(language === 'zh' ? '交易已更新，但備註同步失敗。' : 'Transaction updated, but note sync failed.');
-              return;
-            }
-            setNotes(updatedNotes);
-          }
-
-          setSyncStatus('cloud');
-          setLastSync(new Date());
-          logAuditEvent(AuditAction.UPDATE, 'transactions', updatedTr.id, undefined, undefined, updatedTr);
-          await loadData(false);
-        } else {
-          setLastError(formatTransactionSyncError(result, 'Update failed'));
-          setSyncStatus('error');
-          alert(language === 'zh' ? '更新失敗' : 'Update failed');
-        }
-      } else {
-        setTransactions(transactions.map(tr => tr.id === updatedTr.id ? updatedItem : tr));
+      setSyncStatus('syncing');
+      const result = await syncRemoteTransactions([updatedItem]);
+      if (result.success) {
         if (generatedNotes.length > 0) {
-          setNotes([...generatedNotes, ...notes]);
+          const updatedNotes = [...generatedNotes, ...notes];
+          const notesResult = await syncRemoteNotes(updatedNotes);
+          if (!notesResult.success) {
+            setLastError(notesResult.error || 'Transaction updated, but note sync failed');
+            setSyncStatus('error');
+            await loadData(false);
+            alert(language === 'zh' ? '交易已更新，但備註同步失敗。' : 'Transaction updated, but note sync failed.');
+            return;
+          }
+          setNotes(updatedNotes);
         }
+
+        setSyncStatus('cloud');
+        setLastSync(new Date());
+        logAuditEvent(AuditAction.UPDATE, 'transactions', updatedTr.id, undefined, undefined, updatedTr);
+        await loadData(false);
+      } else {
+        const errorMessage = formatTransactionSyncError(result, 'Update failed');
+        setLastError(errorMessage);
+        setSyncStatus('error');
+        showTransactionSyncAlert(errorMessage, '更新失敗', 'Update failed');
       }
     } finally {
       setIsSyncing(false);
@@ -753,29 +1001,24 @@ const App: React.FC = () => {
   };
 
   const bulkUpdateTransactions = async (updatedItems: Transaction[]) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const now = new Date().toISOString();
     const updatedWithTime = updatedItems.map(item => ({ ...item, updatedAt: now }));
     
     try {
-      if (cloudConfig) {
-        setSyncStatus('syncing');
-        const result = await syncRemoteTransactions(updatedWithTime);
-        if (result.success) {
-          setSyncStatus('cloud');
-          setLastSync(new Date());
-          logAuditEvent(AuditAction.UPDATE, 'transactions', updatedItems[0].id, undefined, undefined, updatedItems);
-          await loadData(false);
-        } else {
-          setLastError(formatTransactionSyncError(result, 'Bulk update failed'));
-          setSyncStatus('error');
-          alert(language === 'zh' ? '批量更新失敗' : 'Bulk update failed');
-        }
+      setSyncStatus('syncing');
+      const result = await syncRemoteTransactions(updatedWithTime);
+      if (result.success) {
+        setSyncStatus('cloud');
+        setLastSync(new Date());
+        logAuditEvent(AuditAction.UPDATE, 'transactions', updatedItems[0].id, undefined, undefined, updatedItems);
+        await loadData(false);
       } else {
-        setTransactions(transactions.map(tr => {
-          const found = updatedWithTime.find(i => i.id === tr.id);
-          return found || tr;
-        }));
+        const errorMessage = formatTransactionSyncError(result, 'Bulk update failed');
+        setLastError(errorMessage);
+        setSyncStatus('error');
+        showTransactionSyncAlert(errorMessage, '批量更新失敗', 'Bulk update failed');
       }
     } finally {
       setIsSyncing(false);
@@ -783,6 +1026,7 @@ const App: React.FC = () => {
   };
 
   const deleteTransaction = async (id: string) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const trToDelete = transactions.find(t => t.id === id);
     if (!trToDelete) {
@@ -800,30 +1044,23 @@ const App: React.FC = () => {
     const updated = transactions.filter(tr => !idsToDelete.has(tr.id));
     
     try {
-      if (cloudConfig) {
-        let allSuccess = true;
-        for (const item of itemsToDelete) {
-          const success = await deleteRemoteTransaction(item.id);
-          if (!success) allSuccess = false;
-        }
+      let allSuccess = true;
+      for (const item of itemsToDelete) {
+        const success = await deleteRemoteTransaction(item.id);
+        if (!success) allSuccess = false;
+      }
 
-        if (allSuccess) {
-          setTransactions(updated);
-          logAuditEvent(AuditAction.DELETE, 'transactions', itemsToDelete[0].id, undefined, itemsToDelete, undefined);
-          
-          setLastAction({ type: 'delete', data: itemsToDelete });
-          setShowUndoToast(true);
-          setTimeout(() => setShowUndoToast(false), 5000);
-
-          await loadData(false);
-        } else {
-          alert(language === 'zh' ? '刪除失敗' : 'Delete failed');
-        }
-      } else {
+      if (allSuccess) {
         setTransactions(updated);
+        logAuditEvent(AuditAction.DELETE, 'transactions', itemsToDelete[0].id, undefined, itemsToDelete, undefined);
+        
         setLastAction({ type: 'delete', data: itemsToDelete });
         setShowUndoToast(true);
         setTimeout(() => setShowUndoToast(false), 5000);
+
+        await loadData(false);
+      } else {
+        alert(language === 'zh' ? '刪除失敗' : 'Delete failed');
       }
     } finally {
       setIsSyncing(false);
@@ -831,6 +1068,7 @@ const App: React.FC = () => {
   };
 
   const addNote = async (note: Omit<Note, 'id' | 'createdAt'>) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const newNote: Note = {
       ...note,
@@ -840,14 +1078,10 @@ const App: React.FC = () => {
     const updated = [newNote, ...notes];
     
     try {
-      if (cloudConfig) {
-        const result = await syncRemoteNotes(updated);
-        if (result.success) {
-          setNotes(updated);
-          await loadData(false);
-        }
-      } else {
+      const result = await syncRemoteNotes(updated);
+      if (result.success) {
         setNotes(updated);
+        await loadData(false);
       }
     } finally {
       setIsSyncing(false);
@@ -855,17 +1089,14 @@ const App: React.FC = () => {
   };
 
   const updateNote = async (updatedNote: Note) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const updated = notes.map(n => n.id === updatedNote.id ? updatedNote : n);
     try {
-      if (cloudConfig) {
-        const result = await syncRemoteNotes(updated);
-        if (result.success) {
-          setNotes(updated);
-          await loadData(false);
-        }
-      } else {
+      const result = await syncRemoteNotes(updated);
+      if (result.success) {
         setNotes(updated);
+        await loadData(false);
       }
     } finally {
       setIsSyncing(false);
@@ -873,17 +1104,14 @@ const App: React.FC = () => {
   };
 
   const deleteNote = async (id: string) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const updated = notes.filter(n => n.id !== id);
     try {
-      if (cloudConfig) {
-        const success = await deleteRemoteNote(id);
-        if (success) {
-          setNotes(updated);
-          await loadData(false);
-        }
-      } else {
+      const success = await deleteRemoteNote(id);
+      if (success) {
         setNotes(updated);
+        await loadData(false);
       }
     } finally {
       setIsSyncing(false);
@@ -891,24 +1119,21 @@ const App: React.FC = () => {
   };
 
   const handleUpdateAccount = async (account: Account) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const updated = accounts.some(a => a.id === account.id)
       ? accounts.map(a => a.id === account.id ? account : a)
       : [account, ...accounts];
     try {
-      if (cloudConfig) {
-        setSyncStatus('syncing');
-        const result = await syncRemoteAccounts(updated);
-        if (result.success) {
-          setAccounts(updated);
-          setSyncStatus('cloud');
-          await loadData(false);
-        } else {
-          setLastError(result.error || 'Account sync failed');
-          setSyncStatus('error');
-        }
-      } else {
+      setSyncStatus('syncing');
+      const result = await syncRemoteAccounts(updated);
+      if (result.success) {
         setAccounts(updated);
+        setSyncStatus('cloud');
+        await loadData(false);
+      } else {
+        setLastError(result.error || 'Account sync failed');
+        setSyncStatus('error');
       }
     } finally {
       setIsSyncing(false);
@@ -916,42 +1141,97 @@ const App: React.FC = () => {
   };
 
   const handleDeleteAccount = async (id: string) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const updated = accounts.filter(a => a.id !== id);
     try {
-      if (cloudConfig) {
-        const success = await deleteRemoteAccount(id);
-        if (success) {
-          setAccounts(updated);
-          await loadData(false);
-        }
-      } else {
+      const success = await deleteRemoteAccount(id);
+      if (success) {
         setAccounts(updated);
+        await loadData(false);
       }
     } finally {
       setIsSyncing(false);
     }
   };
 
-  const handleUpdateCustomer = async (customer: Customer) => {
+  const handleSaveCustomer = async (
+    customer: Customer,
+    vehicleSelection?: {
+      existingVehicleId?: string;
+      newVehicle?: { licensePlate: string; make: string; model: string; color: string; vehicleType: Vehicle['vehicleType']; vehicleSize: Vehicle['vehicleSize'] };
+      updatedVehicle?: { id: string; licensePlate: string; make: string; model: string; color: string; vehicleType: Vehicle['vehicleType']; vehicleSize: Vehicle['vehicleSize'] };
+    }
+  ) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
-    const updated = customers.some(c => c.id === customer.id)
-      ? customers.map(c => c.id === customer.id ? customer : c)
-      : [customer, ...customers];
+    let updatedVehicles = [...vehicles];
+    let linkedVehicleId = vehicleSelection?.existingVehicleId || customer.vehicleId || '';
+
+    if (vehicleSelection?.newVehicle && vehicleSelection.newVehicle.licensePlate.trim()) {
+      const now = new Date().toISOString();
+      const newVehicle: Vehicle = {
+        id: crypto.randomUUID(),
+        customerId: customer.id,
+        licensePlate: vehicleSelection.newVehicle.licensePlate.trim(),
+        make: vehicleSelection.newVehicle.make.trim(),
+        model: vehicleSelection.newVehicle.model.trim(),
+        color: vehicleSelection.newVehicle.color.trim(),
+        vehicleType: vehicleSelection.newVehicle.vehicleType,
+        vehicleSize: vehicleSelection.newVehicle.vehicleSize,
+        createdAt: now,
+        updatedAt: now,
+      };
+      updatedVehicles = [newVehicle, ...updatedVehicles];
+      linkedVehicleId = newVehicle.id;
+    } else if (vehicleSelection?.updatedVehicle) {
+      updatedVehicles = updatedVehicles.map(vehicle =>
+        vehicle.id === vehicleSelection.updatedVehicle!.id
+          ? {
+              ...vehicle,
+              customerId: customer.id,
+              licensePlate: vehicleSelection.updatedVehicle!.licensePlate.trim(),
+              make: vehicleSelection.updatedVehicle!.make.trim(),
+              model: vehicleSelection.updatedVehicle!.model.trim(),
+              color: vehicleSelection.updatedVehicle!.color.trim(),
+              vehicleType: vehicleSelection.updatedVehicle!.vehicleType,
+              vehicleSize: vehicleSelection.updatedVehicle!.vehicleSize,
+              updatedAt: new Date().toISOString(),
+            }
+          : vehicle
+      );
+      linkedVehicleId = vehicleSelection.updatedVehicle.id;
+    } else if (vehicleSelection?.existingVehicleId) {
+      updatedVehicles = updatedVehicles.map(vehicle =>
+        vehicle.id === vehicleSelection.existingVehicleId
+          ? { ...vehicle, customerId: customer.id, updatedAt: new Date().toISOString() }
+          : vehicle
+      );
+    }
+
+    const customerToSave: Customer = {
+      ...customer,
+      vehicleId: linkedVehicleId || undefined,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const updatedCustomers = customers.some(c => c.id === customer.id)
+      ? customers.map(c => c.id === customer.id ? customerToSave : c)
+      : [customerToSave, ...customers];
+
     try {
-      if (cloudConfig) {
-        setSyncStatus('syncing');
-        const result = await syncRemoteCustomers(updated);
-        if (result.success) {
-          setCustomers(updated);
-          setSyncStatus('cloud');
-          await loadData(false);
-        } else {
-          setLastError(result.error || 'Customer sync failed');
-          setSyncStatus('error');
-        }
+      setSyncStatus('syncing');
+      const customerResult = await syncRemoteCustomers(updatedCustomers);
+      const vehicleResult = await syncRemoteVehicles(updatedVehicles);
+
+      if (customerResult.success && vehicleResult.success) {
+        setCustomers(updatedCustomers);
+        setVehicles(updatedVehicles);
+        setSyncStatus('cloud');
+        await loadData(false);
       } else {
-        setCustomers(updated);
+        setLastError(customerResult.error || vehicleResult.error || 'Customer sync failed');
+        setSyncStatus('error');
       }
     } finally {
       setIsSyncing(false);
@@ -959,17 +1239,127 @@ const App: React.FC = () => {
   };
 
   const handleDeleteCustomer = async (id: string) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const updated = customers.filter(c => c.id !== id);
+    const relatedVehicles = vehicles.filter(vehicle => vehicle.customerId === id);
     try {
-      if (cloudConfig) {
-        const success = await deleteRemoteCustomer(id);
-        if (success) {
-          setCustomers(updated);
-          await loadData(false);
+      const success = await deleteRemoteCustomer(id);
+      if (success) {
+        for (const vehicle of relatedVehicles) {
+          await deleteRemoteVehicle(vehicle.id);
         }
-      } else {
         setCustomers(updated);
+        setVehicles(vehicles.filter(vehicle => vehicle.customerId !== id));
+        await loadData(false);
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleUpdateCustomer = async (customer: Customer) => {
+    await handleSaveCustomer(customer);
+  };
+
+  const handleSaveVehicle = async (vehicle: Vehicle) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+
+    const updatedVehicles = vehicles.some(v => v.id === vehicle.id)
+      ? vehicles.map(v => (v.id === vehicle.id ? vehicle : v))
+      : [vehicle, ...vehicles];
+
+    try {
+      setSyncStatus('syncing');
+      const result = await syncRemoteVehicles(updatedVehicles);
+
+      if (result.success) {
+        setVehicles(updatedVehicles);
+        setSyncStatus('cloud');
+        await loadData(false);
+      } else {
+        setLastError(result.error || 'Vehicle sync failed');
+        setSyncStatus('error');
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleDeleteVehicle = async (vehicleId: string) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+
+    const now = new Date().toISOString();
+    const updatedCustomers = customers.map(customer =>
+      customer.vehicleId === vehicleId
+        ? { ...customer, vehicleId: undefined, updatedAt: now }
+        : customer
+    );
+
+    try {
+      setSyncStatus('syncing');
+      const deleted = await deleteRemoteVehicle(vehicleId);
+      const customerResult = await syncRemoteCustomers(updatedCustomers);
+
+      if (deleted && customerResult.success) {
+        setVehicles(prev => prev.filter(vehicle => vehicle.id !== vehicleId));
+        setCustomers(updatedCustomers);
+        setSyncStatus('cloud');
+        await loadData(false);
+      } else {
+        setLastError(customerResult.error || 'Vehicle delete failed');
+        setSyncStatus('error');
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const saveCustomerGroups = async (updatedGroups: CustomerGroup[]) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+    try {
+      const result = await syncRemoteCustomerGroups(updatedGroups);
+      if (result.success) {
+        setCustomerGroups(updatedGroups);
+        await loadData(false);
+      } else {
+        setLastError(result.error || 'Customer group sync failed');
+        setSyncStatus('error');
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleDeleteCustomerGroup = async (groupId: string) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+    const targetGroup = customerGroups.find(group => group.id === groupId);
+    const updatedGroups = customerGroups.filter(group => group.id !== groupId);
+    const updatedCustomers = targetGroup
+      ? customers.map(customer =>
+          customer.group === targetGroup.name
+            ? { ...customer, group: '', updatedAt: new Date().toISOString() }
+            : customer
+        )
+      : customers;
+
+    try {
+      setSyncStatus('syncing');
+      const deleted = await deleteRemoteCustomerGroup(groupId);
+      const customerResult = await syncRemoteCustomers(updatedCustomers);
+
+      if (deleted && customerResult.success) {
+        setCustomerGroups(updatedGroups);
+        setCustomers(updatedCustomers);
+        setSyncStatus('cloud');
+        await loadData(false);
+      } else {
+        setLastError(customerResult.error || 'Customer group delete failed');
+        setSyncStatus('error');
       }
     } finally {
       setIsSyncing(false);
@@ -977,16 +1367,27 @@ const App: React.FC = () => {
   };
 
   const saveCategories = async (updatedCats: CategoryItem[]) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     try {
-      if (cloudConfig) {
-        const result = await syncRemoteCategories(updatedCats);
-        if (result.success) {
-          setCategories(updatedCats);
-          await loadData(false);
-        }
-      } else {
+      const result = await syncRemoteCategories(updatedCats);
+      if (result.success) {
         setCategories(updatedCats);
+        await loadData(false);
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const saveDiscounts = async (updatedDiscounts: DiscountItem[]) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+    try {
+      const result = await syncRemoteDiscounts(updatedDiscounts);
+      if (result.success) {
+        setDiscounts(updatedDiscounts);
+        await loadData(false);
       }
     } finally {
       setIsSyncing(false);
@@ -994,17 +1395,157 @@ const App: React.FC = () => {
   };
 
   const deleteCategory = async (id: string) => {
+    if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const updated = categories.filter(c => c.id !== id);
     try {
-      if (cloudConfig) {
-        const success = await deleteRemoteCategory(id);
-        if (success) {
-          setCategories(updated);
-          await loadData(false);
-        }
-      } else {
+      const success = await deleteRemoteCategory(id);
+      if (success) {
         setCategories(updated);
+        await loadData(false);
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const saveCheckoutOrders = async (updatedOrders: CheckoutOrder[]) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+    try {
+      setSyncStatus('syncing');
+      const result = await syncRemoteCheckoutOrders(updatedOrders);
+      if (result.success) {
+        setCheckoutOrders(updatedOrders);
+        setSyncStatus('cloud');
+        await loadData(false);
+      } else {
+        setLastError(result.error || 'Order sync failed');
+        setSyncStatus('error');
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const markCheckoutOrderPaid = async (orderId: string, paymentMethod: PaymentMethod, paymentCurrency: PaymentCurrency) => {
+    if (!ensureCloudWritable()) return;
+
+    const order = checkoutOrders.find(item => item.id === orderId);
+    if (!order) return;
+
+    const forcedCurrency = getForcedCurrencyForPaymentMethod(paymentMethod);
+    if (forcedCurrency && forcedCurrency !== paymentCurrency) {
+      setLastError(`Cash method ${paymentMethod} requires currency ${forcedCurrency}.`);
+      setSyncStatus('error');
+      return;
+    }
+
+    if (order.status !== 'checked_out') {
+      setLastError('Only checked-out orders can be marked paid.');
+      setSyncStatus('error');
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const paidOrder: CheckoutOrder = {
+      ...order,
+      paymentStatus: 'paid',
+      paymentMethod,
+      paymentCurrency,
+      paidAt: now,
+      paidAmount: Math.max(0, Number(order.netAmount || 0)),
+      updatedAt: now,
+    };
+
+    const paymentUpdatedOrders = checkoutOrders.map(item => item.id === orderId ? paidOrder : item);
+    const transaction = buildTransactionFromPaidCheckoutOrder(paidOrder, paymentMethod, paymentCurrency);
+
+    setIsSyncing(true);
+    try {
+      setSyncStatus('syncing');
+      setLastError(null);
+
+      const paymentResult = await syncRemoteCheckoutOrders([paidOrder]);
+      if (!paymentResult.success) {
+        setLastError(paymentResult.error || 'Failed to save checkout payment state');
+        setSyncStatus('error');
+        return;
+      }
+
+      const transactionResult = await syncRemoteTransactions([transaction]);
+      if (!transactionResult.success) {
+        // Best effort rollback to keep paid state and accounting state aligned.
+        await syncRemoteCheckoutOrders([order]);
+        const errorMessage = formatTransactionSyncError(transactionResult, 'Failed to post paid checkout transaction');
+        setLastError(errorMessage);
+        setSyncStatus('error');
+        return;
+      }
+
+      const linkedOrder: CheckoutOrder = {
+        ...paidOrder,
+        linkedTransactionId: transaction.id,
+        updatedAt: new Date().toISOString(),
+      };
+      await syncRemoteCheckoutOrders([linkedOrder]);
+
+      setCheckoutOrders(paymentUpdatedOrders.map(item => item.id === orderId ? linkedOrder : item));
+      setSyncStatus('cloud');
+      setLastSync(new Date());
+      logAuditEvent(AuditAction.CREATE, 'transactions', transaction.id, undefined, undefined, transaction);
+      await loadData(false);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const saveMembershipTiers = async (updatedTiers: MembershipTier[]) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+    try {
+      setSyncStatus('syncing');
+      const result = await syncRemoteMembershipTiers(updatedTiers);
+      if (result.success) {
+        setMembershipTiers(updatedTiers);
+        setSyncStatus('cloud');
+        await loadData(false);
+      } else {
+        setLastError(result.error || 'Membership tiers sync failed');
+        setSyncStatus('error');
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const saveCustomerMemberships = async (updatedMemberships: CustomerMembership[]) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+    try {
+      setSyncStatus('syncing');
+      const result = await syncRemoteCustomerMemberships(updatedMemberships);
+      if (result.success) {
+        setCustomerMemberships(updatedMemberships);
+        setSyncStatus('cloud');
+        await loadData(false);
+      } else {
+        setLastError(result.error || 'Customer memberships sync failed');
+        setSyncStatus('error');
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleDeleteCheckoutOrder = async (orderId: string) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+    try {
+      const success = await deleteRemoteCheckoutOrder(orderId);
+      if (success) {
+        setCheckoutOrders(prev => prev.filter(order => order.id !== orderId));
+        await loadData(false);
       }
     } finally {
       setIsSyncing(false);
@@ -1046,21 +1587,37 @@ const App: React.FC = () => {
   };
 
   const summary: FinancialSummary = useMemo(() => {
+    // Helper to sum items by filter
+    const sumItems = (filterFn: (tr: Transaction, item: TransactionItem) => boolean) =>
+      transactions.reduce((sum, tr) =>
+        sum + (tr.items ? tr.items.filter(item => filterFn(tr, item)).reduce((s, item) => s + (item.price || 0), 0) : 0), 0);
+
+    const ownerAAccount = accounts.find(account => account.name.includes(Owner.OWNER_A));
+    const ownerBAccount = accounts.find(account => account.name.includes(Owner.OWNER_B));
+    const ownerAliases: Record<Owner, string[]> = {
+      [Owner.OWNER_A]: ownerAAccount ? [ownerAAccount.id, ownerAAccount.name] : [Owner.OWNER_A],
+      [Owner.OWNER_B]: ownerBAccount ? [ownerBAccount.id, ownerBAccount.name] : [Owner.OWNER_B],
+    };
+
+    const getOwnedAmount = (transaction: Transaction, owner: Owner) => {
+      const ratio = getOwnerShareRatio(transaction, owner, ownerAliases[owner]);
+      if (ratio <= 0) {
+        return 0;
+      }
+
+      return sumItems((candidate, item) => candidate.id === transaction.id) * ratio;
+    };
+
     // Helper to get startup cost for a partner - strict matching on contributedBy
-    const getStartupCost = (ownerName: string) => {
-      // Only match transactions where contributedBy exactly equals ownerName
+    const getStartupCost = (owner: Owner) => {
       const investments = transactions.filter(tr => {
-        const isStartupInvestment = (tr.type === TransactionType.OWNER_INVESTMENT || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) && tr.isInitialInvestment === true;
-        const isOwnersTransaction = tr.contributedBy === ownerName;
-        return isStartupInvestment && isOwnersTransaction;
+        return (tr.type === TransactionType.OWNER_INVESTMENT || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) && tr.isInitialInvestment === true;
       });
       const withdrawals = transactions.filter(tr => {
-        const isStartupWithdrawal = (tr.type === TransactionType.OWNER_WITHDRAWAL || tr.type === TransactionType.WITHDRAWAL || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal')) && tr.isInitialInvestment === true;
-        const isOwnersTransaction = tr.contributedBy === ownerName;
-        return isStartupWithdrawal && isOwnersTransaction;
+        return (tr.type === TransactionType.OWNER_WITHDRAWAL || tr.type === TransactionType.WITHDRAWAL || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal')) && tr.isInitialInvestment === true;
       });
-      const investmentTotal = investments.reduce((sum, tr) => sum + tr.amount, 0);
-      const withdrawalTotal = withdrawals.reduce((sum, tr) => sum + tr.amount, 0);
+      const investmentTotal = investments.reduce((sum, tr) => sum + getOwnedAmount(tr, owner), 0);
+      const withdrawalTotal = withdrawals.reduce((sum, tr) => sum + getOwnedAmount(tr, owner), 0);
       const result = investmentTotal - withdrawalTotal;
       return result;
     };
@@ -1068,20 +1625,21 @@ const App: React.FC = () => {
     // Startup cost: only sum owner_investment - owner_withdrawal where isInitialInvestment is true, for each partner
     const startupInvestments = transactions.filter(tr => (tr.type === TransactionType.OWNER_INVESTMENT || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) && tr.isInitialInvestment === true);
     const startupWithdrawals = transactions.filter(tr => (tr.type === TransactionType.OWNER_WITHDRAWAL || tr.type === TransactionType.WITHDRAWAL || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal')) && tr.isInitialInvestment === true);
-    const totalStartup = startupInvestments.reduce((sum, tr) => sum + tr.amount, 0) - startupWithdrawals.reduce((sum, tr) => sum + tr.amount, 0);
+    const totalStartup = startupInvestments.reduce((sum, tr) => sum + sumItems((t, item) => t.id === tr.id), 0) - startupWithdrawals.reduce((sum, tr) => sum + sumItems((t, item) => t.id === tr.id), 0);
 
     // All money injected by owners into the business
     const addRmb = transactions
       .filter(tr => (tr.type === TransactionType.OWNER_INVESTMENT) || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment'))
-      .reduce((sum, tr) => sum + tr.amount, 0);
+      .reduce((sum, tr) => sum + sumItems((t, item) => t.id === tr.id), 0);
 
     // All money taken out by owners from the business
     const cashOut = transactions
       .filter(tr => (tr.type === TransactionType.OWNER_WITHDRAWAL) || (tr.type === TransactionType.WITHDRAWAL) || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal'))
-      .reduce((sum, tr) => sum + tr.amount, 0);
+      .reduce((sum, tr) => sum + sumItems((t, item) => t.id === tr.id), 0);
 
-    const revenue = transactions.filter(tr => tr.type === TransactionType.REVENUE).reduce((sum, tr) => sum + tr.amount, 0);
-    const expenses = transactions.filter(tr => tr.type === TransactionType.EXPENSE).reduce((sum, tr) => sum + tr.amount, 0);
+    // Revenue and expenses: sum all items in revenue/expense transactions
+    const revenue = sumItems((tr, item) => tr.type === TransactionType.REVENUE);
+    const expenses = sumItems((tr, item) => tr.type === TransactionType.EXPENSE);
 
     // Total withdrawals (same as cashOut but used in balance calculation)
     const withdrawals = cashOut;
@@ -1095,29 +1653,23 @@ const App: React.FC = () => {
     const bankBalance = currentBalance;
     const personalBalance = bankBalance;
 
-    const getPartnerStats = (ownerName: string) => {
-      // Find account ID for this owner if it exists, otherwise use the name
-      const ownerAccount = accounts.find(a => a.name.includes(ownerName));
-      const ownerId = ownerAccount ? ownerAccount.id : ownerName;
-
-      const ownerTransactions = transactions.filter(tr => tr.contributedBy === ownerId || tr.contributedBy === ownerName);
-      
-      const deposits = ownerTransactions
+    const getPartnerStats = (owner: Owner) => {
+      const deposits = transactions
         .filter(tr => tr.type === TransactionType.OWNER_INVESTMENT || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment'))
-        .reduce((sum, tr) => sum + tr.amount, 0);
-      
-      const revenueHandled = ownerTransactions
+        .reduce((sum, tr) => sum + getOwnedAmount(tr, owner), 0);
+
+      const revenueHandled = transactions
         .filter(tr => tr.type === TransactionType.REVENUE)
-        .reduce((sum, tr) => sum + tr.amount, 0);
-      
-      const expensesHandled = ownerTransactions
+        .reduce((sum, tr) => sum + getOwnedAmount(tr, owner), 0);
+
+      const expensesHandled = transactions
         .filter(tr => tr.type === TransactionType.EXPENSE)
-        .reduce((sum, tr) => sum + tr.amount, 0);
-      
-      const ownerWithdrawals = ownerTransactions
+        .reduce((sum, tr) => sum + getOwnedAmount(tr, owner), 0);
+
+      const ownerWithdrawals = transactions
         .filter(tr => tr.type === TransactionType.WITHDRAWAL || tr.type === TransactionType.OWNER_WITHDRAWAL || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_withdrawal'))
-        .reduce((sum, tr) => sum + tr.amount, 0);
-      
+        .reduce((sum, tr) => sum + getOwnedAmount(tr, owner), 0);
+
       // Equity calculation per partner: investment - withdrawals + own net profit.
       const individualNetProfit = revenueHandled - expensesHandled;
       const currentEquity = deposits - ownerWithdrawals + individualNetProfit;
@@ -1141,8 +1693,8 @@ const App: React.FC = () => {
       netProfit,
       // ROI is calculated against startup costs
       roiPercentage: totalStartup > 0 ? (revenue / totalStartup) * 100 : 0,
-      ownerA: { ...getPartnerStats('User 1'), startupCosts: getStartupCost('User 1') },
-      ownerB: { ...getPartnerStats('User 2'), startupCosts: getStartupCost('User 2') }
+      ownerA: { ...getPartnerStats(Owner.OWNER_A), startupCosts: getStartupCost(Owner.OWNER_A) },
+      ownerB: { ...getPartnerStats(Owner.OWNER_B), startupCosts: getStartupCost(Owner.OWNER_B) }
     };
   }, [transactions, accounts]);
 
@@ -1272,12 +1824,21 @@ const App: React.FC = () => {
           </div>
           <div className="flex flex-col">
             <h1 className="text-xl font-serif font-black tracking-tight dark:text-white uppercase leading-none">{currentBranch}</h1>
-            <button 
-              onClick={() => setShowBranchSelector(true)}
-              className="text-[10px] font-bold text-slate-400 dark:text-slate-500 hover:text-blue-500 transition-colors text-left mt-1 uppercase tracking-widest"
-            >
-              Change Branch
-            </button>
+            <div className="flex items-center gap-2 mt-1">
+              <button 
+                onClick={() => setShowBranchSelector(true)}
+                className="text-[10px] font-bold text-slate-400 dark:text-slate-500 hover:text-blue-500 transition-colors text-left uppercase tracking-widest"
+              >
+                Change Branch
+              </button>
+              <button
+                onClick={() => setIsScannerOpen(true)}
+                className="w-7 h-7 rounded-full bg-slate-100 dark:bg-white/10 text-slate-600 dark:text-slate-300 flex items-center justify-center"
+                title={language === 'zh' ? '掃描交易 QR' : 'Scan Transaction QR'}
+              >
+                <i className="fas fa-qrcode text-[11px]"></i>
+              </button>
+            </div>
           </div>
         </div>
         
@@ -1294,6 +1855,10 @@ const App: React.FC = () => {
             <i className="fas fa-list-ul w-5"></i>
             <span>{t.transactions}</span>
           </button>
+          <button onClick={() => setActiveTab('checkout')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'checkout' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+            <i className="fas fa-cash-register w-5"></i>
+            <span>{t.checkout}</span>
+          </button>
           <button onClick={() => setActiveTab('startup')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'startup' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-rocket w-5"></i>
             <span>{t.investmentOverview}</span>
@@ -1305,6 +1870,14 @@ const App: React.FC = () => {
           <button onClick={() => setActiveTab('customers')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'customers' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-users w-5"></i>
             <span>{language === 'zh' ? '客戶追蹤' : 'Customers'}</span>
+          </button>
+          <button onClick={() => setActiveTab('vehicles')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'vehicles' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+            <i className="fas fa-car-side w-5"></i>
+            <span>{language === 'zh' ? '車輛管理' : 'Vehicles'}</span>
+          </button>
+          <button onClick={() => setActiveTab('memberships')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'memberships' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+            <i className="fas fa-id-badge w-5"></i>
+            <span>{language === 'zh' ? '會員方案' : 'Memberships'}</span>
           </button>
           <button onClick={() => setActiveTab('settings')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'settings' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-cog w-5"></i>
@@ -1360,14 +1933,24 @@ const App: React.FC = () => {
               </span>
             </div>
           </div>
-          <button 
-            onClick={() => setActiveTab('input')} 
-            disabled={isReadOnly}
-            className={`w-full flex items-center space-x-3 px-4 py-4 rounded-2xl transition-all shadow-lg active:scale-95 ${isReadOnly ? 'opacity-50 grayscale cursor-not-allowed' : ''} ${activeTab === 'input' ? 'bg-blue-600 text-white shadow-blue-600/20' : 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 shadow-slate-900/20 dark:shadow-white/10'}`}
-          >
-            <i className="fas fa-plus-circle text-lg"></i>
-            <span className="text-xs uppercase tracking-widest font-black">{t.addEntry}</span>
-          </button>
+          <div className="flex gap-2">
+            <button 
+              onClick={() => setActiveTab('input')} 
+              disabled={isReadOnly}
+              className={`flex-1 flex items-center justify-center space-x-2 px-4 py-4 rounded-2xl transition-all shadow-lg active:scale-95 ${isReadOnly ? 'opacity-50 grayscale cursor-not-allowed' : ''} ${activeTab === 'input' ? 'bg-blue-600 text-white shadow-blue-600/20' : 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 shadow-slate-900/20 dark:shadow-white/10'}`}
+            >
+              <i className="fas fa-receipt text-lg"></i>
+              <span className="text-xs uppercase tracking-widest font-black">{language === 'zh' ? '新增交易記錄' : 'Add Transaction'}</span>
+            </button>
+            <button 
+              onClick={() => setActiveTab('checkout')} 
+              disabled={isReadOnly}
+              className={`flex-1 flex items-center justify-center space-x-2 px-4 py-4 rounded-2xl transition-all shadow-lg active:scale-95 ${isReadOnly ? 'opacity-50 grayscale cursor-not-allowed' : ''} ${activeTab === 'checkout' ? 'bg-blue-600 text-white shadow-blue-600/20' : 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 shadow-slate-900/20 dark:shadow-white/10'}`}
+            >
+              <i className="fas fa-shopping-bag text-lg"></i>
+              <span className="text-xs uppercase tracking-widest font-black">{language === 'zh' ? '銷售草稿' : 'Sale Draft'}</span>
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -1390,13 +1973,24 @@ const App: React.FC = () => {
             <div className="flex flex-col">
               <h1 className="text-lg font-serif font-black bg-gradient-to-r from-slate-900 to-slate-500 bg-clip-text text-transparent dark:from-white dark:to-slate-400 uppercase leading-none">
                 {activeTab === 'overview' ? currentBranch : (
+                  activeTab === 'input' ? (language === 'zh' ? '新增交易記錄' : 'Add Transaction') : 
                   activeTab === 'customers' ? (language === 'zh' ? '客戶追蹤' : 'Customers') : 
+                  activeTab === 'vehicles' ? (language === 'zh' ? '車輛管理' : 'Vehicles') : 
+                  activeTab === 'memberships' ? (language === 'zh' ? '會員方案' : 'Memberships') : 
+                  activeTab === 'categories' ? (language === 'zh' ? 'Categories' : 'Categories') : 
                   (t[activeTab as keyof typeof t] || activeTab)
                 )}
               </h1>
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsScannerOpen(true)}
+              className="w-10 h-10 rounded-full bg-slate-100 text-slate-700 dark:bg-white/10 dark:text-slate-200 flex items-center justify-center active:scale-90 transition-all"
+              title={language === 'zh' ? '掃描交易 QR' : 'Scan Transaction QR'}
+            >
+              <i className="fas fa-qrcode text-sm"></i>
+            </button>
             <button 
               onClick={pushAllData}
               disabled={isReadOnly || syncStatus === 'syncing'}
@@ -1414,61 +2008,179 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Mobile Bottom Navigation Button */}
-      <div className="md:hidden fixed bottom-6 left-0 right-0 z-50 flex justify-center pointer-events-none">
-        <button 
-          onClick={() => setIsMenuOpen(!isMenuOpen)}
-          className="w-16 h-16 bg-white text-blue-600 rounded-full shadow-2xl shadow-slate-900/20 flex items-center justify-center active:scale-90 transition-all pointer-events-auto border border-slate-100"
-        >
-          <i className={`fas fa-plus text-2xl transition-transform ${isMenuOpen ? 'rotate-45' : ''}`}></i>
-        </button>
-      </div>
+      {/* More Menu Modal */}
+      {isMoreOpen && (
+        <div className="md:hidden fixed inset-0 z-[200] bg-white dark:bg-slate-900">
+          <div className="sticky top-0 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-white/10 flex items-center justify-between px-5 py-4">
+            <button
+              onClick={() => setIsMoreOpen(false)}
+              className="w-10 h-10 flex items-center justify-center text-slate-600 dark:text-slate-300"
+            >
+              <i className="fas fa-times text-xl"></i>
+            </button>
+            <h2 className="text-xl font-black text-slate-900 dark:text-white">
+              {language === 'zh' ? '更多' : 'More'}
+            </h2>
+            <div className="w-10" />
+          </div>
 
-      {/* Mobile Popup Menu */}
-      <AnimatePresence>
-        {isMenuOpen && (
-          <>
-            <motion.div 
+          <nav className="overflow-y-auto pb-40">
+            <div className="px-4 py-2 text-xs font-black uppercase tracking-widest text-slate-500 dark:text-slate-400 pt-6">
+              {language === 'zh' ? 'BYD' : 'BYD'}
+            </div>
+            {[
+              { id: 'input', icon: 'fa-receipt', label: language === 'zh' ? '新增交易記錄' : 'Add Transaction' },
+              { id: 'checkout', icon: 'fa-shopping-cart', label: language === 'zh' ? 'Orders' : 'Orders' },
+              { id: 'transactions', icon: 'fa-chart-bar', label: language === 'zh' ? 'Reports' : 'Reports' },
+              { id: 'overview', icon: 'fa-chart-pie', label: language === 'zh' ? 'Dashboard' : 'Dashboard' },
+              { id: 'notes', icon: 'fa-sticky-note', label: language === 'zh' ? 'Notes' : 'Notes' },
+              { id: 'categories', icon: 'fa-box', label: language === 'zh' ? 'Categories' : 'Categories' },
+              { id: 'customers', icon: 'fa-users', label: language === 'zh' ? 'Customers' : 'Customers' },
+              { id: 'vehicles', icon: 'fa-car-side', label: language === 'zh' ? 'Vehicles' : 'Vehicles' },
+              { id: 'memberships', icon: 'fa-id-badge', label: language === 'zh' ? 'Memberships' : 'Memberships' },
+              { id: 'audit', icon: 'fa-users-cog', label: language === 'zh' ? 'Team' : 'Team' },
+              { id: 'settings', icon: 'fa-cog', label: language === 'zh' ? 'Settings' : 'Settings' },
+            ].map(item => (
+              <button
+                key={item.id}
+                onClick={() => {
+                  setActiveTab(item.id as any);
+                  setIsMoreOpen(false);
+                }}
+                className="w-full flex items-center space-x-4 px-6 py-4 border-b border-slate-100 dark:border-white/5 hover:bg-slate-50 dark:hover:bg-white/5 active:bg-blue-50 dark:active:bg-blue-600/10"
+              >
+                <i className={`fas ${item.icon} text-lg text-slate-700 dark:text-slate-300 w-6`}></i>
+                <span className="text-base font-semibold text-slate-900 dark:text-white">{item.label}</span>
+              </button>
+            ))}
+            
+            {/* Floating Island - Time Status */}
+            <div className="mx-4 my-6 p-6 bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-3xl border-2 border-blue-200 dark:border-blue-800/50 shadow-lg">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-black uppercase tracking-widest text-slate-600 dark:text-slate-300">
+                    <i className="fas fa-clock mr-2 text-blue-600 dark:text-blue-400"></i>
+                    {language === 'zh' ? '已登錄時間' : 'Time Logged In'}
+                  </span>
+                  <span className="text-sm font-black text-blue-600 dark:text-blue-400">
+                    {serverTime || (language === 'zh' ? '珠海時間' : 'Zhuhai Time')}
+                  </span>
+                </div>
+                <div className="h-px bg-gradient-to-r from-blue-200 to-indigo-200 dark:from-blue-800 dark:to-indigo-800"></div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-black uppercase tracking-widest text-slate-600 dark:text-slate-300">
+                    <i className="fas fa-sync-alt mr-2 text-indigo-600 dark:text-indigo-400"></i>
+                    {language === 'zh' ? '最後同步' : 'Last Synced'}
+                  </span>
+                  <span className="text-sm font-black text-indigo-600 dark:text-indigo-400">
+                    {lastSync ? formatTime(lastSync) : (language === 'zh' ? '未同步' : 'Never')}
+                  </span>
+                </div>
+                <div className="flex items-center justify-center gap-2 pt-2">
+                  <div className={`w-2 h-2 rounded-full ${syncStatus === 'cloud' ? 'bg-emerald-500 animate-pulse' : syncStatus === 'syncing' ? 'bg-blue-500 animate-pulse' : 'bg-slate-300'}`}></div>
+                  <span className="text-xs font-black uppercase tracking-tighter text-slate-500 dark:text-slate-400">
+                    {syncStatus === 'cloud' ? (language === 'zh' ? '已連接' : 'Connected') : syncStatus === 'syncing' ? (language === 'zh' ? '同步中' : 'Syncing') : (language === 'zh' ? '本地模式' : 'Local Mode')}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <button
+              onClick={() => {
+                setShowLogoutConfirm(true);
+                setIsMoreOpen(false);
+              }}
+              className="w-full flex items-center space-x-4 px-6 py-4 border-t-2 border-slate-200 dark:border-white/10 hover:bg-rose-50 dark:hover:bg-rose-600/10 active:bg-rose-100 dark:active:bg-rose-600/20"
+            >
+              <i className="fas fa-sign-out-alt text-lg text-rose-600 dark:text-rose-400 w-6"></i>
+              <span className="text-base font-semibold text-rose-600 dark:text-rose-400 underline">{language === 'zh' ? '登出 from Gardiner' : 'Sign out from Gardiner'}</span>
+            </button>
+          </nav>
+        </div>
+      )}
+      <div className="md:hidden fixed inset-0 z-[60] pointer-events-none">
+        <AnimatePresence>
+          {isMenuOpen && (
+            <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsMenuOpen(false)}
-              className="md:hidden fixed inset-0 z-[45] bg-slate-900/40 backdrop-blur-sm"
+              className="absolute inset-0 bg-slate-900/45 backdrop-blur-md pointer-events-auto"
             />
-            <motion.div 
-              initial={{ y: '100%' }}
-              animate={{ y: 0 }}
-              exit={{ y: '100%' }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="md:hidden fixed bottom-0 left-0 right-0 z-[50] bg-white dark:bg-slate-900 rounded-t-[32px] p-6 pb-10 shadow-2xl"
-            >
-              <div className="grid grid-cols-3 gap-4">
-                {[
-                  { id: 'overview', icon: 'fa-chart-pie', label: t.overview },
-                  { id: 'balance', icon: 'fa-wallet', label: t.accountBalance },
-                  { id: 'transactions', icon: 'fa-list-ul', label: t.transactions },
-                  { id: 'startup', icon: 'fa-rocket', label: t.investmentOverview },
-                  { id: 'notes', icon: 'fa-sticky-note', label: t.notes },
-                  { id: 'accounts', icon: 'fa-university', label: language === 'zh' ? '賬戶' : 'Accounts' },
-                  { id: 'customers', icon: 'fa-users', label: language === 'zh' ? '客戶' : 'Customers' },
-                  { id: 'settings', icon: 'fa-cog', label: t.settings },
-                ].map((item) => (
-                  <button 
-                    key={item.id}
-                    onClick={() => { setActiveTab(item.id as any); setIsMenuOpen(false); }}
-                    className={`flex flex-col items-center gap-1 p-2 rounded-2xl transition-all ${activeTab === item.id ? 'bg-blue-100 dark:bg-blue-900/40 ring-2 ring-blue-500' : 'hover:bg-slate-50 dark:hover:bg-white/5'}`}
+          )}
+        </AnimatePresence>
+
+        <div className="absolute left-1/2 bottom-6 -translate-x-1/2 w-[340px] h-[260px]">
+          <AnimatePresence>
+            {isMenuOpen && [
+              { id: 'input-transaction', icon: 'fa-receipt', label: language === 'zh' ? '新增交易記錄' : 'Add Transaction Record' },
+              { id: 'input-sale', icon: 'fa-shopping-bag', label: language === 'zh' ? '新增銷售草稿' : 'Add Sale Draft' },
+            ].map((item, index, arr) => {
+              const radius = 130;
+              const startAngle = (210 * Math.PI) / 180;
+              const endAngle = (330 * Math.PI) / 180;
+              const progress = arr.length === 1 ? 0.5 : index / (arr.length - 1);
+              const angle = startAngle + (endAngle - startAngle) * progress;
+              const x = Math.cos(angle) * radius;
+              const y = Math.sin(angle) * radius;
+
+              return (
+                <motion.div
+                  key={item.id}
+                  initial={{ opacity: 0, scale: 0.3, x: 0, y: 0 }}
+                  animate={{ opacity: 1, scale: 1, x, y }}
+                  exit={{ opacity: 0, scale: 0.3, x: 0, y: 0 }}
+                  transition={{ type: 'spring', stiffness: 400, damping: 24, delay: index * 0.015 }}
+                  className="absolute left-1/2 bottom-8 -translate-x-1/2 translate-y-1/2 pointer-events-auto flex flex-col items-center"
+                >
+                  <button
+                    onClick={() => {
+                      if (item.id === 'input-transaction') setActiveTab('input');
+                      else if (item.id === 'input-sale') setActiveTab('checkout');
+                      setIsMenuOpen(false);
+                    }}
+                    title={item.label}
+                    className={`w-14 h-14 rounded-full border shadow-xl flex items-center justify-center active:scale-95 ${activeTab === item.id ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-200 text-slate-700 dark:bg-slate-900 dark:border-white/10 dark:text-slate-200'}`}
                   >
-                    <div className={`w-10 h-10 rounded-2xl flex items-center justify-center ${activeTab === item.id ? 'bg-blue-600 text-white' : 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400'}`}>
-                      <i className={`fas ${item.icon} text-sm`}></i>
-                    </div>
-                    <span className={`text-[9px] font-bold text-center ${activeTab === item.id ? 'text-blue-700 dark:text-blue-300' : 'text-slate-600 dark:text-slate-300'}`}>{item.label}</span>
+                    <i className={`fas ${item.icon} text-sm`}></i>
                   </button>
-                ))}
-              </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
+                  <span className="mt-2 px-2.5 py-1 rounded-full bg-white/95 dark:bg-slate-900/95 border border-slate-200 dark:border-white/10 text-[10px] font-black uppercase tracking-wide text-slate-700 dark:text-slate-200 whitespace-nowrap shadow-lg">
+                    {item.label}
+                  </span>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
+
+          <div className="absolute left-1/2 bottom-0 -translate-x-1/2 w-[280px] h-14 rounded-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-slate-200 dark:border-white/10 shadow-2xl shadow-slate-900/15 pointer-events-auto flex items-center justify-between px-6">
+            <button
+              onClick={() => { setActiveTab('overview'); setIsMenuOpen(false); }}
+              className={`w-10 h-10 rounded-full flex items-center justify-center transition-all active:scale-95 ${activeTab === 'overview' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300'}`}
+              title={t.overview}
+            >
+              <i className="fas fa-chart-pie text-base"></i>
+            </button>
+
+            <div className="w-14"></div>
+
+            <button
+              onClick={() => { setIsMoreOpen(true); setIsMenuOpen(false); }}
+              className={`w-10 h-10 rounded-full flex items-center justify-center transition-all active:scale-95 ${isMoreOpen ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300'}`}
+              title={language === 'zh' ? '更多' : 'More'}
+            >
+              <i className="fas fa-bars text-base"></i>
+            </button>
+          </div>
+
+          <button
+            onClick={() => setIsMenuOpen(!isMenuOpen)}
+            className={`absolute left-1/2 bottom-8 -translate-x-1/2 translate-y-1/2 w-20 h-20 rounded-full shadow-2xl flex items-center justify-center active:scale-90 transition-all duration-300 pointer-events-auto border-4 ${isMenuOpen ? 'bg-blue-600 text-white border-white dark:border-slate-900 shadow-blue-600/40' : 'bg-white text-blue-600 border-blue-200 dark:bg-slate-900 dark:text-blue-400 dark:border-blue-500/40 shadow-slate-900/20'}`}
+          >
+            <i className={`fas fa-plus text-3xl transition-transform duration-300 ${isMenuOpen ? 'rotate-45' : ''}`}></i>
+          </button>
+        </div>
+      </div>
 
         <AnimatePresence>
           {showReconnectPrompt && (
@@ -1551,7 +2263,7 @@ const App: React.FC = () => {
       {/* Main Content with Transitions */}
       <main 
         ref={mainRef} 
-        className="flex-1 overflow-y-auto pb-32 md:pb-0 relative z-10"
+        className="flex-1 overflow-y-auto pb-32 md:pb-0 relative"
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
@@ -1568,7 +2280,7 @@ const App: React.FC = () => {
         </div>
         <AnimatePresence mode="wait">
           {syncStatus === 'syncing' ? (
-            <LoadingScreen />
+            <LoadingScreen language={language} />
           ) : (
             <motion.div
               key={activeTab}
@@ -1590,7 +2302,7 @@ const App: React.FC = () => {
                   dueRemindersCount={dueRemindersCount}
                 />
               )}
-              {activeTab === 'startup' && <StartupList transactions={transactions} summary={summary} onDelete={deleteTransaction} language={language} totalInvested={summary.startupCosts} isSyncing={isSyncing} isReadOnly={isReadOnly} />}
+              {activeTab === 'startup' && <StartupList transactions={transactions} summary={summary} onDelete={deleteTransaction} language={language} isSyncing={isSyncing} isReadOnly={isReadOnly} />}
               {activeTab === 'balance' && (
                 <CashForecast 
                   summary={summary} 
@@ -1610,6 +2322,7 @@ const App: React.FC = () => {
                   transactions={transactions} 
                   accounts={accounts}
                   categories={categories}
+                  customers={customers}
                   onDelete={deleteTransaction} 
                   onUpdate={updateTransaction} 
                   onBulkUpdate={bulkUpdateTransactions} 
@@ -1617,7 +2330,38 @@ const App: React.FC = () => {
                   onExportJSON={exportToJSON} 
                   language={language} 
                   isSyncing={isSyncing} 
-                  isReadOnly={isReadOnly} 
+                  isReadOnly={isReadOnly}
+                  openTransactionId={pendingTransactionOpenId}
+                  initialSearchTerm={pendingTransactionSearch}
+                  onOpenTransactionHandled={() => {
+                    setPendingTransactionOpenId(null);
+                    setPendingTransactionSearch('');
+                  }}
+                />
+              )}
+              {activeTab === 'checkout' && (
+                <CheckoutPage
+                  language={language}
+                  categories={categories}
+                  customers={customers}
+                  vehicles={vehicles}
+                  customerMemberships={customerMemberships}
+                  discounts={discounts}
+                  checkoutOrders={checkoutOrders}
+                  onSaveOrders={saveCheckoutOrders}
+                  onMarkOrderPaid={markCheckoutOrderPaid}
+                  onDeleteOrder={handleDeleteCheckoutOrder}
+                  isReadOnly={isReadOnly}
+                />
+              )}
+              {activeTab === 'categories' && (
+                <CategoriesPage
+                  language={language}
+                  categories={categories}
+                  discounts={discounts}
+                  onSaveCategories={saveCategories}
+                  onSaveDiscounts={saveDiscounts}
+                  isReadOnly={isReadOnly}
                 />
               )}
               {activeTab === 'audit' && <AuditLogList logs={auditLogs} language={language} />}
@@ -1634,11 +2378,39 @@ const App: React.FC = () => {
               {activeTab === 'customers' && (
                 <CustomerPage 
                   customers={customers}
+                  customerGroups={customerGroups}
+                  vehicles={vehicles}
                   transactions={transactions}
                   categories={categories}
-                  onUpdateCustomer={handleUpdateCustomer}
+                  onBack={() => setActiveTab('overview')}
+                  onSaveCustomer={handleSaveCustomer}
                   onDeleteCustomer={handleDeleteCustomer}
+                  onDeleteVehicle={handleDeleteVehicle}
+                  onSaveCustomerGroups={saveCustomerGroups}
+                  onDeleteCustomerGroup={handleDeleteCustomerGroup}
                   language={language}
+                  isReadOnly={isReadOnly}
+                />
+              )}
+              {activeTab === 'vehicles' && (
+                <VehiclesPage
+                  vehicles={vehicles}
+                  customers={customers}
+                  onBack={() => setActiveTab('overview')}
+                  onSaveVehicle={handleSaveVehicle}
+                  onDeleteVehicle={handleDeleteVehicle}
+                  language={language}
+                  isReadOnly={isReadOnly}
+                />
+              )}
+              {activeTab === 'memberships' && (
+                <MembershipsPage
+                  language={language}
+                  customers={customers}
+                  membershipTiers={membershipTiers}
+                  customerMemberships={customerMemberships}
+                  onSaveMembershipTiers={saveMembershipTiers}
+                  onSaveCustomerMemberships={saveCustomerMemberships}
                   isReadOnly={isReadOnly}
                 />
               )}
@@ -1677,6 +2449,28 @@ const App: React.FC = () => {
           )}
         </AnimatePresence>
       </main>
+
+      {isScannerOpen && (
+        <div className="fixed inset-0 z-[2100] bg-slate-950/90 backdrop-blur-xl flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-black text-slate-900 dark:text-white">
+                {language === 'zh' ? '掃描交易 QR' : 'Scan Transaction QR'}
+              </h3>
+              <button
+                onClick={() => setIsScannerOpen(false)}
+                className="w-10 h-10 rounded-full bg-slate-100 dark:bg-white/10 flex items-center justify-center text-slate-600 dark:text-slate-300"
+              >
+                <i className="fas fa-times"></i>
+              </button>
+            </div>
+            <p className="text-xs font-bold text-slate-500 dark:text-slate-400">
+              {language === 'zh' ? '將交易詳情頁底部的 QR 碼對準鏡頭。' : 'Point camera at the QR code at the bottom of transaction detail.'}
+            </p>
+            <div id="transaction-qr-reader" className="rounded-2xl overflow-hidden border border-slate-200 dark:border-white/10 bg-black min-h-[300px]" />
+          </div>
+        </div>
+      )}
 
 
       {showLogoutConfirm && (

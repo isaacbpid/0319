@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CloudConfig, CategoryItem, TransactionType } from '../types';
 import { translations } from '../translations';
-import { testConnection } from '../services/database';
+import { reserveNextCategoryId, testConnection } from '../services/database';
 
 interface SettingsPageProps {
   language: 'zh' | 'en';
@@ -79,11 +79,45 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   const [newCategoryType, setNewCategoryType] = useState<TransactionType>(TransactionType.REVENUE);
   const [isSavingCategories, setIsSavingCategories] = useState(false);
 
+  const getNextCategoryIdLocal = (type: TransactionType): string => {
+    const prefix = type === TransactionType.REVENUE ? 'rev' : 'exp';
+    const storageKey = `gardiner_category_seq_${prefix}`;
+
+    const maxExisting = categories
+      .map(category => {
+        const match = category.id.match(new RegExp(`^${prefix}-(\\d+)$`));
+        return match ? Number(match[1]) : 0;
+      })
+      .reduce((max, value) => Math.max(max, value), 0);
+
+    const storedValue = Number(localStorage.getItem(storageKey) || '0');
+    const nextValue = Math.max(maxExisting, Number.isFinite(storedValue) ? storedValue : 0) + 1;
+
+    localStorage.setItem(storageKey, String(nextValue));
+    return `${prefix}-${nextValue}`;
+  };
+
+  const getNextCategoryId = async (type: TransactionType): Promise<string> => {
+    const prefix = type === TransactionType.REVENUE ? 'rev' : 'exp';
+
+    const reserved = await reserveNextCategoryId(prefix);
+    if (reserved.id) {
+      const match = reserved.id.match(new RegExp(`^${prefix}-(\\d+)$`));
+      if (match) {
+        localStorage.setItem(`gardiner_category_seq_${prefix}`, match[1]);
+      }
+      return reserved.id;
+    }
+
+    return getNextCategoryIdLocal(type);
+  };
+
   const handleAddCategory = async () => {
     if (!newCategoryName.trim()) return;
+    const newId = await getNextCategoryId(newCategoryType);
     
     const newCat: CategoryItem = {
-      id: Math.random().toString(36).substr(2, 9),
+      id: newId,
       name: newCategoryName.trim(),
       type: newCategoryType,
       createdAt: new Date().toISOString()
@@ -130,8 +164,15 @@ create table if not exists transactions (
   notes text,
   customer_id text,
   from_account_id text,
-  to_account_id text
+  to_account_id text,
+  split_mode text,
+  split_ratio_a numeric(8,4),
+  split_ratio_b numeric(8,4)
 );
+
+alter table if exists transactions add column if not exists split_mode text;
+alter table if exists transactions add column if not exists split_ratio_a numeric(8,4);
+alter table if exists transactions add column if not exists split_ratio_b numeric(8,4);
 
 -- 2. Create the Audit Logs table
 create table if not exists audit_logs (
@@ -159,17 +200,99 @@ create table if not exists categories (
   id text primary key,
   name text not null,
   type text not null,
-  created_at timestamp with time zone default now()
+  description text,
+  price numeric default 0,
+  image_url text,
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
 );
+
+alter table if exists categories add column if not exists description text;
+alter table if exists categories add column if not exists price numeric default 0;
+alter table if exists categories add column if not exists image_url text;
+alter table if exists categories add column if not exists updated_at timestamp with time zone default now();
+
+-- 4.1 Create server-side monotonic category ID allocator
+create table if not exists id_sequences (
+  key text primary key,
+  value bigint not null default 0
+);
+
+create or replace function reserve_next_category_id(p_prefix text)
+returns text
+language plpgsql
+security definer
+as $$
+declare
+  seq_key text;
+  max_existing bigint;
+  next_val bigint;
+begin
+  if p_prefix not in ('rev', 'exp') then
+    raise exception 'Invalid category prefix: %', p_prefix;
+  end if;
+
+  seq_key := 'category_' || p_prefix;
+
+  select coalesce(max(((regexp_match(id, ('^' || p_prefix || '-([0-9]+)$')))[1])::bigint), 0)
+  into max_existing
+  from categories;
+
+  insert into id_sequences (key, value)
+  values (seq_key, max_existing)
+  on conflict (key)
+  do update set value = greatest(id_sequences.value, excluded.value);
+
+  update id_sequences
+  set value = value + 1
+  where key = seq_key
+  returning value into next_val;
+
+  return p_prefix || '-' || next_val::text;
+end;
+$$;
 
 -- 5. Create the Customers table
 create table if not exists customers (
   id text primary key,
   name text not null,
+  chinese_name text,
+  group_name text,
+  country_code text,
   phone text,
-  vehicle_make text,
-  vehicle_model text,
-  vehicle_color text,
+  vehicle_id text,
+  company_code text,
+  birthday date,
+  notes text,
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+alter table if exists customers add column if not exists group_name text;
+alter table if exists customers add column if not exists chinese_name text;
+alter table if exists customers add column if not exists country_code text;
+alter table if exists customers add column if not exists vehicle_id text;
+alter table if exists customers add column if not exists company_code text;
+alter table if exists customers add column if not exists birthday date;
+
+-- 5.1 Create the Customer Groups table
+create table if not exists customer_groups (
+  id text primary key,
+  name text not null,
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+-- 5.2 Create the Vehicles table
+create table if not exists vehicles (
+  id text primary key,
+  customer_id text not null,
+  license_plate text,
+  make text,
+  model text,
+  color text,
+  year text,
+  vin text,
   notes text,
   created_at timestamp with time zone default now(),
   updated_at timestamp with time zone default now()
@@ -201,17 +324,74 @@ create table if not exists accounts (
   created_at timestamp with time zone default now()
 );
 
--- 9. DISABLE SECURITY (Fixes the Write Error)
+-- 9. Create Checkout Sales table
+create table if not exists checkout_sales (
+  id text primary key,
+  customer_id text,
+  subtotal numeric not null default 0,
+  occurred_at timestamp with time zone default now(),
+  created_at timestamp with time zone default now()
+);
+
+-- 10. Create Checkout Line Items table
+create table if not exists checkout_line_items (
+  id text primary key,
+  sale_id text not null references checkout_sales(id) on delete cascade,
+  name text not null,
+  price numeric not null,
+  is_discount boolean not null default false,
+  created_at timestamp with time zone default now()
+);
+
+-- 11. Create Discounts table
+create table if not exists discounts (
+  id text primary key,
+  name text not null,
+  code text,
+  effect_type text not null default 'discount',
+  amount_type text not null,
+  amount numeric not null default 0,
+  category text,
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+create table if not exists transaction_items (
+  id text primary key,
+  transaction_id text not null references transactions(id) on delete cascade,
+  category_id text not null,
+  name text not null,
+  price numeric(12,2) not null,
+  notes text,
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+create index if not exists idx_transaction_items_transaction_id on transaction_items(transaction_id);
+create index if not exists idx_transaction_items_category_id on transaction_items(category_id);
+
+alter table if exists discounts add column if not exists category text;
+alter table if exists discounts add column if not exists updated_at timestamp with time zone default now();
+alter table if exists discounts add column if not exists code text;
+alter table if exists discounts add column if not exists effect_type text not null default 'discount';
+
+-- 12. DISABLE SECURITY (Fixes the Write Error)
 alter table transactions disable row level security;
 alter table audit_logs disable row level security;
 alter table notes disable row level security;
 alter table categories disable row level security;
 alter table customers disable row level security;
+alter table customer_groups disable row level security;
+alter table vehicles disable row level security;
 alter table admin_sessions disable row level security;
 alter table bank_balance_transactions disable row level security;
 alter table accounts disable row level security;
+alter table checkout_sales disable row level security;
+alter table checkout_line_items disable row level security;
+alter table discounts disable row level security;
+alter table transaction_items disable row level security;
 
--- 10. GRANT FULL ACCESS
+-- 13. GRANT FULL ACCESS
 grant all on table transactions to anon;
 grant all on table transactions to authenticated;
 grant all on table audit_logs to anon;
@@ -220,22 +400,39 @@ grant all on table notes to anon;
 grant all on table notes to authenticated;
 grant all on table categories to anon;
 grant all on table categories to authenticated;
+grant all on table id_sequences to anon;
+grant all on table id_sequences to authenticated;
 grant all on table customers to anon;
 grant all on table customers to authenticated;
+grant all on table customer_groups to anon;
+grant all on table customer_groups to authenticated;
+grant all on table vehicles to anon;
+grant all on table vehicles to authenticated;
 grant all on table admin_sessions to anon;
 grant all on table admin_sessions to authenticated;
 grant all on table bank_balance_transactions to anon;
 grant all on table bank_balance_transactions to authenticated;
 grant all on table accounts to anon;
 grant all on table accounts to authenticated;
+grant all on table checkout_sales to anon;
+grant all on table checkout_sales to authenticated;
+grant all on table checkout_line_items to anon;
+grant all on table checkout_line_items to authenticated;
+grant all on table discounts to anon;
+grant all on table discounts to authenticated;
+grant all on table transaction_items to anon;
+grant all on table transaction_items to authenticated;
 
--- 11. Enable Realtime Sync
+-- 14. Enable Realtime Sync
 begin;
   drop publication if exists supabase_realtime;
-  create publication supabase_realtime for table transactions, notes, categories, customers, admin_sessions, bank_balance_transactions, accounts;
+  create publication supabase_realtime for table transactions, transaction_items, notes, categories, customers, customer_groups, vehicles, admin_sessions, bank_balance_transactions, accounts, checkout_sales, checkout_line_items, discounts;
 commit;
 
--- 12. Server Time Function
+grant execute on function reserve_next_category_id(text) to anon;
+grant execute on function reserve_next_category_id(text) to authenticated;
+
+-- 15. Server Time Function
 create or replace function get_server_time() returns timestamp with time zone as $$
   select now();
 $$ language sql stable;`;
@@ -288,7 +485,7 @@ $$ language sql stable;`;
                   type="password" 
                   value={password}
                   onChange={e => setPassword(e.target.value)}
-                  placeholder="Enter Password"
+                  placeholder={language === 'zh' ? '密碼' : 'Enter Password'}
                   autoFocus
                   className="w-full bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-2xl px-4 py-4 text-center text-xl font-black tracking-[0.5em] outline-none focus:ring-2 focus:ring-blue-500 dark:text-white"
                 />

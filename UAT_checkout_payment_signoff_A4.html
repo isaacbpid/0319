@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UAT Sign-Off Sheet: Checkout Payment to Transactions</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 12mm;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+      font-size: 11pt;
+      line-height: 1.35;
+      color: #111827;
+      background: #ffffff;
+    }
+
+    .page {
+      width: 100%;
+      max-width: 190mm;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 16pt;
+      margin: 0 0 10px 0;
+      border-bottom: 2px solid #111827;
+      padding-bottom: 6px;
+    }
+
+    h2 {
+      font-size: 12pt;
+      margin: 14px 0 8px;
+      border-left: 4px solid #111827;
+      padding-left: 8px;
+    }
+
+    h3 {
+      font-size: 11pt;
+      margin: 10px 0 6px;
+    }
+
+    p {
+      margin: 4px 0;
+    }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 18px;
+      margin-bottom: 10px;
+    }
+
+    .line {
+      border-bottom: 1px solid #9ca3af;
+      min-height: 22px;
+      padding-bottom: 2px;
+      display: flex;
+      align-items: flex-end;
+    }
+
+    .line strong {
+      margin-right: 6px;
+      white-space: nowrap;
+    }
+
+    ul {
+      margin: 6px 0 8px 18px;
+      padding: 0;
+    }
+
+    li {
+      margin: 3px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 9pt;
+      page-break-inside: auto;
+    }
+
+    th, td {
+      border: 1px solid #6b7280;
+      vertical-align: top;
+      padding: 4px;
+      word-wrap: break-word;
+    }
+
+    th {
+      background: #f3f4f6;
+      font-weight: 700;
+      text-align: left;
+    }
+
+    tr {
+      page-break-inside: avoid;
+      page-break-after: auto;
+    }
+
+    .small {
+      font-size: 9pt;
+      color: #374151;
+    }
+
+    pre {
+      margin: 6px 0;
+      padding: 8px;
+      border: 1px solid #d1d5db;
+      background: #f9fafb;
+      border-radius: 4px;
+      white-space: pre-wrap;
+      font-size: 9pt;
+      line-height: 1.3;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 18px;
+      margin-top: 4px;
+    }
+
+    .checkbox-row {
+      margin: 6px 0;
+    }
+
+    .no-break {
+      page-break-inside: avoid;
+    }
+
+    @media print {
+      body {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>UAT Sign-Off Sheet: Checkout Payment to Transactions</h1>
+
+    <div class="meta-grid">
+      <div class="line"><strong>Date:</strong></div>
+      <div class="line"><strong>Tester:</strong></div>
+      <div class="line"><strong>Environment:</strong></div>
+      <div class="line"><strong>Build/Commit:</strong></div>
+      <div class="line"><strong>Supabase Project Ref:</strong></div>
+    </div>
+
+    <h2>Objective</h2>
+    <p>Validate that checkout orders are posted to transactions only when paid, with strict method-currency rules and no duplicate postings.</p>
+
+    <h2>Preconditions</h2>
+    <ul>
+      <li>[ ] Migration 20260418_checkout_payment_to_transactions.sql has been applied.</li>
+      <li>[ ] App points to the correct Supabase project.</li>
+      <li>[ ] At least one customer and one active service category exist.</li>
+      <li>[ ] You can open Checkout, Transactions, and Dashboard/Stats pages.</li>
+    </ul>
+
+    <h2>Baseline Snapshot</h2>
+    <div class="summary-grid">
+      <div class="line"><strong>Transactions count before test:</strong></div>
+      <div class="line"><strong>Service stats before test:</strong></div>
+      <div class="line"><strong>Timestamp baseline captured:</strong></div>
+    </div>
+
+    <h2>Test Execution Log</h2>
+    <table>
+      <colgroup>
+        <col style="width: 8%" />
+        <col style="width: 16%" />
+        <col style="width: 17%" />
+        <col style="width: 17%" />
+        <col style="width: 10%" />
+        <col style="width: 10%" />
+        <col style="width: 12%" />
+        <col style="width: 10%" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>TC ID</th>
+          <th>Scenario</th>
+          <th>Steps Performed</th>
+          <th>Expected Result</th>
+          <th>Actual Result</th>
+          <th>Status</th>
+          <th>Evidence</th>
+          <th>Notes/Bug ID</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>TC-01</td>
+          <td>Unpaid checked_out does not post</td>
+          <td>Create checked_out unpaid order; do not click Mark Paid and Post; check Transactions/Stats</td>
+          <td>No new transaction, stats unchanged</td>
+          <td></td>
+          <td>PASS / FAIL</td>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TC-02</td>
+          <td>Paid posting creates linked transaction</td>
+          <td>On pending checked_out order choose FPS + RMB; click Mark Paid and Post</td>
+          <td>payment_status=paid, paid_amount set, linked_transaction_id set; one transaction with checkout_order_id created</td>
+          <td></td>
+          <td>PASS / FAIL</td>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TC-03</td>
+          <td>Cash mapping: HKD_cash</td>
+          <td>Use HKD_cash and try non-HKD currency</td>
+          <td>Invalid mapping blocked or auto-forced HKD</td>
+          <td></td>
+          <td>PASS / FAIL</td>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TC-04</td>
+          <td>Cash mapping: RMB_cash</td>
+          <td>Use RMB_cash and try non-RMB currency</td>
+          <td>Invalid mapping blocked or auto-forced RMB</td>
+          <td></td>
+          <td>PASS / FAIL</td>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TC-05</td>
+          <td>Cash mapping: MOP_cash</td>
+          <td>Use MOP_cash and try non-MOP currency</td>
+          <td>Invalid mapping blocked or auto-forced MOP</td>
+          <td></td>
+          <td>PASS / FAIL</td>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TC-06</td>
+          <td>Non-cash accepts selected currency</td>
+          <td>Use Alipay + HKD; wechat + MOP on separate orders</td>
+          <td>Both post successfully with exact method/currency persisted</td>
+          <td></td>
+          <td>PASS / FAIL</td>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TC-07</td>
+          <td>Idempotency/no duplicate transaction</td>
+          <td>Retry paid-post action on same order or refresh and retry</td>
+          <td>No duplicate transaction; still one row per checkout_order_id</td>
+          <td></td>
+          <td>PASS / FAIL</td>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td>TC-08</td>
+          <td>Reporting consistency</td>
+          <td>Sum posted test order amounts and compare stats delta</td>
+          <td>Stats delta equals posted transaction totals</td>
+          <td></td>
+          <td>PASS / FAIL</td>
+          <td></td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="no-break">
+      <h2>Optional SQL Evidence</h2>
+
+      <h3>1) Linked transaction for an order</h3>
+      <pre>select id, checkout_order_id, amount, payment_status, payment_method, payment_currency
+from transactions
+where checkout_order_id = '&lt;order_id&gt;';</pre>
+
+      <h3>2) Duplicate protection check</h3>
+      <pre>select checkout_order_id, count(*)
+from transactions
+where checkout_order_id is not null
+group by checkout_order_id
+having count(*) &gt; 1;</pre>
+
+      <h3>3) Checkout payment state check</h3>
+      <pre>select id, status, payment_status, payment_method, payment_currency, paid_amount, linked_transaction_id
+from checkout_sales
+where id = '&lt;order_id&gt;';</pre>
+    </div>
+
+    <div class="no-break">
+      <h2>Sign-Off</h2>
+      <div class="summary-grid">
+        <div class="line"><strong>Total test cases executed:</strong></div>
+        <div class="line"><strong>Passed:</strong></div>
+        <div class="line"><strong>Failed:</strong></div>
+        <div class="line"><strong>Blocked:</strong></div>
+      </div>
+
+      <div class="checkbox-row">[ ] GO (Ready for production)</div>
+      <div class="checkbox-row">[ ] NO-GO (Requires fixes)</div>
+
+      <div class="summary-grid">
+        <div class="line"><strong>Approved by:</strong></div>
+        <div class="line"><strong>Date:</strong></div>
+      </div>
+      <div class="line" style="margin-top: 8px;"><strong>Comments:</strong></div>
+      <p class="small" style="margin-top: 8px;">Print tip: Use browser Print, set Paper Size to A4, and save as PDF if needed.</p>
+    </div>
+  </div>
+</body>
+</html>
