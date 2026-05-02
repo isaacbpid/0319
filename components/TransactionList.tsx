@@ -25,16 +25,19 @@ interface TransactionListProps {
   language: 'zh' | 'en';
   isSyncing?: boolean;
   isReadOnly?: boolean;
+  isConnectionError?: boolean;
+  hideFinancialData?: boolean;
   filter?: (tr: Transaction) => boolean;
   openTransactionId?: string | null;
   initialSearchTerm?: string;
   onOpenTransactionHandled?: () => void;
+  onRetryConnection?: () => void;
 }
 
 type SizeFilter = 'ALL' | 'SMALL' | 'MEDIUM' | 'LARGE';
 type DateFilter = 'ALL' | 'TODAY' | 'WEEK' | 'MONTH' | 'CUSTOM';
 
-const TransactionList: React.FC<TransactionListProps> = ({ transactions = [], accounts = [], categories = [], customers = [], onDelete, onUpdate, onBulkUpdate, onExportExcel, onExportJSON, language, isSyncing, isReadOnly, filter, openTransactionId, initialSearchTerm, onOpenTransactionHandled }) => {
+const TransactionList: React.FC<TransactionListProps> = ({ transactions = [], accounts = [], categories = [], customers = [], onDelete, onUpdate, onBulkUpdate, onExportExcel, onExportJSON, language, isSyncing, isReadOnly, isConnectionError, hideFinancialData, filter, openTransactionId, initialSearchTerm, onOpenTransactionHandled, onRetryConnection }) => {
   const t = translations[language];
   const normalizedAccounts = useMemo(() => {
     const cleaned = (accounts || [])
@@ -63,6 +66,11 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions = [], ac
 
   const getContributorLabel = (transaction: Transaction) => {
     return getSplitDisplayLabel(transaction, language) || transaction.contributedBy;
+  };
+
+  const formatMoney = (value: number) => {
+    if (hideFinancialData) return '***';
+    return `¥${value.toLocaleString()}`;
   };
 
   const [search, setSearch] = useState('');
@@ -427,12 +435,23 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions = [], ac
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
-      {isReadOnly && (
-        <div className="bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-800/20 rounded-2xl p-4 flex items-center gap-3 text-rose-600 dark:text-rose-400">
-          <i className="fas fa-lock text-sm"></i>
-          <span className="text-xs font-bold uppercase tracking-widest">
-            {language === 'zh' ? '連接不穩定，目前處於唯讀模式。' : 'Connection unstable. Currently in Read-Only mode.'}
-          </span>
+      {isConnectionError && (
+        <div className="bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-800/20 rounded-2xl p-4 flex items-center justify-between gap-3 text-rose-600 dark:text-rose-400">
+          <div className="flex items-center gap-3">
+            <i className="fas fa-lock text-sm"></i>
+            <span className="text-xs font-bold uppercase tracking-widest">
+              {language === 'zh' ? '連接不穩定，目前處於唯讀模式。' : 'Network unstable. Read-only mode.'}
+            </span>
+          </div>
+          {onRetryConnection && (
+            <button
+              onClick={onRetryConnection}
+              className="text-xs font-black uppercase tracking-widest text-rose-500 hover:text-rose-700 dark:hover:text-rose-300 flex items-center gap-1 shrink-0"
+            >
+              <i className="fas fa-rotate-right text-xs"></i>
+              {language === 'zh' ? '重試' : 'Retry'}
+            </button>
+          )}
         </div>
       )}
       <div className="flex flex-col gap-6">
@@ -735,7 +754,9 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions = [], ac
                   </td>
                   <td className="px-6 py-5 whitespace-nowrap text-sm"><span className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest ${isSplitTransaction(tr) ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/20 dark:text-indigo-400' : tr.contributedBy === Owner.OWNER_A ? 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400' : tr.contributedBy === Owner.OWNER_B ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400' : 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/20 dark:text-indigo-400'}`}>{getContributorLabel(tr)}</span></td>
                   <td className={`px-6 py-5 whitespace-nowrap text-right font-black text-sm tracking-tight ${tr.type === TransactionType.REVENUE ? 'text-emerald-600 dark:text-emerald-400' : (tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? 'text-blue-600 dark:text-blue-400' : 'text-slate-800 dark:text-white'}`}>
-                    {(tr.type === TransactionType.REVENUE || tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? '+' : '-'} ¥{tr.amount.toLocaleString()}
+                    {hideFinancialData
+                      ? '***'
+                      : `${(tr.type === TransactionType.REVENUE || tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? '+' : '-'} ${formatMoney(tr.amount)}`}
                   </td>
                   <td className="px-6 py-5 text-right">
                     <div className="text-[10px] font-black uppercase tracking-widest text-slate-300 dark:text-slate-600">
@@ -814,7 +835,9 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions = [], ac
                   </div>
                 </div>
                 <div className={`text-sm font-black tracking-tight ${tr.type === TransactionType.REVENUE ? 'text-emerald-600 dark:text-emerald-400' : (tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? 'text-blue-600 dark:text-blue-400' : 'text-slate-900 dark:text-white'}`}>
-                  {(tr.type === TransactionType.REVENUE || tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? '+' : '-'} ¥{tr.amount.toLocaleString()}
+                  {hideFinancialData
+                    ? '***'
+                    : `${(tr.type === TransactionType.REVENUE || tr.type === TransactionType.STARTUP || (tr.type === TransactionType.TRANSFER && tr.categoryId === 'owner_investment')) ? '+' : '-'} ${formatMoney(tr.amount)}`}
                 </div>
               </div>
               
@@ -1027,7 +1050,9 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions = [], ac
                 />
               ) : (
                 <p className={`text-5xl font-black tracking-tight ${viewingTransaction.type === TransactionType.REVENUE ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-800 dark:text-white'}`}>
-                  {viewingTransaction.type === TransactionType.REVENUE ? '+' : '-'}¥{viewingTransaction.amount.toLocaleString()}
+                  {hideFinancialData
+                    ? '***'
+                    : `${viewingTransaction.type === TransactionType.REVENUE ? '+' : '-'}${formatMoney(viewingTransaction.amount)}`}
                 </p>
               )}
               {isMultiItem && (
@@ -1184,7 +1209,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ transactions = [], ac
                       <p className="text-xs font-semibold text-slate-400 dark:text-slate-500 mt-1">{categories.find(c => c.id === item.categoryId)?.name || item.categoryId}</p>
                       {item.notes && <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mt-2">{item.notes}</p>}
                     </div>
-                    <p className="text-sm font-black text-slate-700 dark:text-slate-100">¥{item.price.toLocaleString()}</p>
+                    <p className="text-sm font-black text-slate-700 dark:text-slate-100">{hideFinancialData ? '***' : formatMoney(item.price)}</p>
                   </div>
                 ))}
               </div>

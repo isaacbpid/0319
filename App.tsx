@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo, useRef, Component, ErrorInfo, ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Html5Qrcode } from 'html5-qrcode';
-import { Note, Transaction, TransactionType, Category, Owner, FinancialSummary, CloudConfig, AuditAction, AuditLog, CategoryItem, Customer, CustomerGroup, Vehicle, Account, DiscountItem, TransactionItem, CheckoutOrder, MembershipTier, CustomerMembership, PaymentCurrency, PaymentMethod } from './types';
+import { Note, Transaction, TransactionType, Category, Owner, FinancialSummary, CloudConfig, AuditAction, AuditLog, CategoryItem, Customer, CustomerGroup, Vehicle, Account, CurrencyExchangeRate, DiscountItem, TransactionItem, CheckoutOrder, MembershipTier, CustomerMembership, PaymentCurrency, PaymentMethod, EmployeePageKey, EmployeePagePermission, EmployeeUser, UserRole, ChargingRateConfig, ChargingSession, Appointment, CheckoutOrderStatus, CheckoutOrderLine } from './types';
 import Dashboard from './components/Dashboard';
 import TransactionList from './components/TransactionList';
 import TransactionForm from './components/TransactionForm';
@@ -15,19 +15,48 @@ import CustomerPage from './components/CustomerPage';
 import VehiclesPage from './components/VehiclesPage';
 import AccountsPage from './components/AccountsPage';
 import CheckoutPage from './components/CheckoutPage';
+import CompletedCheckoutPage from './components/CompletedCheckoutPage';
+import ServiceLifeCyclePage from './components/ServiceLifeCyclePage';
 import CategoriesPage from './components/CategoriesPage';
 import MembershipsPage from './components/MembershipsPage';
+import ChargingPage from './components/ChargingPage';
+import AppointmentsPage from './components/AppointmentsPage';
 import LoadingScreen from './components/LoadingScreen';
-import { initSupabase, syncRemoteTransactions, deleteRemoteTransaction, subscribeToTransactions, logAuditEvent, fetchAuditLogs, fetchTransactions, fetchRemoteNotes, syncRemoteNotes, deleteRemoteNote, subscribeToNotes, clearAllRemoteData, fetchRemoteCategories, syncRemoteCategories, deleteRemoteCategory, subscribeToCategories, fetchRemoteCustomers, syncRemoteCustomers, deleteRemoteCustomer, subscribeToCustomers, fetchRemoteCustomerGroups, syncRemoteCustomerGroups, deleteRemoteCustomerGroup, subscribeToCustomerGroups, fetchRemoteVehicles, syncRemoteVehicles, deleteRemoteVehicle, subscribeToVehicles, updateAdminSession, clearAdminSession, getServerTime, fetchRemoteAccounts, syncRemoteAccounts, deleteRemoteAccount, subscribeToAccounts, fetchRemoteDiscounts, syncRemoteDiscounts, subscribeToDiscounts, fetchRemoteCheckoutOrders, syncRemoteCheckoutOrders, deleteRemoteCheckoutOrder, subscribeToCheckoutOrders, fetchRemoteMembershipTiers, syncRemoteMembershipTiers, fetchRemoteCustomerMemberships, syncRemoteCustomerMemberships, subscribeToMembershipTiers, subscribeToCustomerMemberships } from './services/database';
+import { initSupabase, syncRemoteTransactions, deleteRemoteTransaction, subscribeToTransactions, logAuditEvent, fetchAuditLogs, fetchTransactions, fetchRemoteNotes, syncRemoteNotes, deleteRemoteNote, subscribeToNotes, clearAllRemoteData, fetchRemoteCategories, syncRemoteCategories, deleteRemoteCategory, subscribeToCategories, fetchRemoteCustomers, syncRemoteCustomers, deleteRemoteCustomer, subscribeToCustomers, fetchRemoteCustomerGroups, syncRemoteCustomerGroups, deleteRemoteCustomerGroup, subscribeToCustomerGroups, fetchRemoteVehicles, syncRemoteVehicles, deleteRemoteVehicle, subscribeToVehicles, updateAdminSession, clearAdminSession, getServerTime, fetchRemoteAccounts, syncRemoteAccounts, deleteRemoteAccount, subscribeToAccounts, fetchRemoteDiscounts, syncRemoteDiscounts, subscribeToDiscounts, fetchRemoteCheckoutOrders, syncRemoteCheckoutOrders, deleteRemoteCheckoutOrder, subscribeToCheckoutOrders, fetchRemoteExchangeRates, fetchRemoteMembershipTiers, syncRemoteMembershipTiers, fetchRemoteCustomerMemberships, syncRemoteCustomerMemberships, subscribeToMembershipTiers, subscribeToCustomerMemberships, fetchEmployeeUsers, fetchEmployeePagePermissions, saveEmployeeUser, saveEmployeePagePermissions, DEFAULT_EMPLOYEE_PAGE_KEYS, fetchRemoteChargingRates, syncRemoteChargingRates, subscribeToChargingRates, fetchRemoteChargingSessions, syncRemoteChargingSessions, subscribeToChargingSessions, fetchRemoteAppointments, syncRemoteAppointments, subscribeToAppointments } from './services/database';
 import { translations } from './translations';
 import { LoginPage } from './components/LoginPage';
+import { convertCurrencyAmount, getApplicableExchangeRate } from './utils/currencyConversion';
 import { getOwnerShareRatio } from './utils/transactionSplit';
+import { normalizeLicensePlate } from './utils/licensePlate';
 
 
 const QUICK_CONNECT_CONFIG: CloudConfig = {
   url: process.env.SUPABASE_URL || "",
   key: process.env.SUPABASE_ANON_KEY || ""
 };
+
+type AppTab = EmployeePageKey;
+
+const ALL_APP_TABS: AppTab[] = [
+  'overview',
+  'transactions',
+  'input',
+  'startup',
+  'balance',
+  'settings',
+  'audit',
+  'notes',
+  'customers',
+  'vehicles',
+  'checkout',
+  'completed_checkout',
+  'service_lifecycle',
+  'categories',
+  'accounts',
+  'memberships',
+  'charging',
+  'appointments',
+];
 
 const buildTransactionNotes = (transactions: Transaction[]): Note[] => {
   return transactions
@@ -62,9 +91,12 @@ const shouldCreateTransactionNote = (previous: Transaction | undefined, next: Tr
 const roundCurrency = (value: number): number => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
 
 const getForcedCurrencyForPaymentMethod = (method: PaymentMethod): PaymentCurrency | null => {
+  if (method === PaymentMethod.FPS) return PaymentCurrency.HKD;
+  if (method === PaymentMethod.PAYME) return PaymentCurrency.HKD;
   if (method === PaymentMethod.HKD_CASH) return PaymentCurrency.HKD;
   if (method === PaymentMethod.RMB_CASH) return PaymentCurrency.RMB;
   if (method === PaymentMethod.MOP_CASH) return PaymentCurrency.MOP;
+  if (method === PaymentMethod.MPAY) return PaymentCurrency.MOP;
   return null;
 };
 
@@ -133,13 +165,13 @@ const buildTransactionFromPaidCheckoutOrder = (
 
   return {
     id: transactionId,
-    receiptNumber: `CO-${order.id.slice(0, 8).toUpperCase()}`,
+    receiptNumber: order.invoiceNumber ? `CO-${order.invoiceNumber}` : `CO-${order.id.slice(0, 8).toUpperCase()}`,
     date: occurredAt.slice(0, 10),
     type: TransactionType.REVENUE,
     items,
     categoryId: items[0]?.categoryId || 'OTHER_ID',
     amount,
-    description: `Checkout ${order.id.slice(0, 8)} (${paymentMethod} ${paymentCurrency})`,
+    description: `Checkout ${order.invoiceNumber || order.id.slice(0, 8)} (${paymentMethod} ${paymentCurrency})`,
     contributedBy: Owner.OWNER_A,
     customerId: order.customerId,
     notes: order.notes,
@@ -147,6 +179,8 @@ const buildTransactionFromPaidCheckoutOrder = (
     paymentStatus: 'paid',
     paymentMethod,
     paymentCurrency,
+    currency: PaymentCurrency.RMB,
+    paymentAmount: order.paymentAmount,
     splitMode: 'NONE',
     updatedAt: new Date().toISOString(),
   };
@@ -206,10 +240,14 @@ const App: React.FC = () => {
   const [customerGroups, setCustomerGroups] = useState<CustomerGroup[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [checkoutOrders, setCheckoutOrders] = useState<CheckoutOrder[]>([]);
+  const [exchangeRates, setExchangeRates] = useState<CurrencyExchangeRate[]>([]);
   const [membershipTiers, setMembershipTiers] = useState<MembershipTier[]>([]);
   const [customerMemberships, setCustomerMemberships] = useState<CustomerMembership[]>([]);
+  const [chargingRates, setChargingRates] = useState<ChargingRateConfig[]>([]);
+  const [chargingSessions, setChargingSessions] = useState<ChargingSession[]>([]);
+  const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'transactions' | 'input' | 'startup' | 'balance' | 'settings' | 'audit' | 'notes' | 'customers' | 'vehicles' | 'checkout' | 'categories' | 'accounts' | 'memberships'>('overview');
+  const [activeTab, setActiveTab] = useState<AppTab>('overview');
   const [language, setLanguage] = useState<'zh' | 'en'>('zh');
   const [syncStatus, setSyncStatus] = useState<'local' | 'syncing' | 'cloud' | 'error'>('local');
   const [lastError, setLastError] = useState<string | null>(null);
@@ -217,9 +255,7 @@ const App: React.FC = () => {
   const [cloudConfig, setCloudConfig] = useState<CloudConfig | null>(null);
   const [showSuccessOverlay, setShowSuccessOverlay] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('dark');
-  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [pullDistance, setPullDistance] = useState(0);
   const [lastAction, setLastAction] = useState<{ type: 'add' | 'delete', data: Transaction[] } | null>(null);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [showReconnectPrompt, setShowReconnectPrompt] = useState(false);
@@ -227,13 +263,66 @@ const App: React.FC = () => {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isForcedReadOnly, setIsForcedReadOnly] = useState(false);
+  const [authRole, setAuthRole] = useState<UserRole>('admin');
+  const [authUsername, setAuthUsername] = useState<string>('admin');
+  const [allowedTabs, setAllowedTabs] = useState<AppTab[]>(ALL_APP_TABS);
+  const [hideFinancialData, setHideFinancialData] = useState(false);
+  const [employeeUsers, setEmployeeUsers] = useState<EmployeeUser[]>([]);
+  const [employeePermissions, setEmployeePermissions] = useState<EmployeePagePermission[]>([]);
   const [serverTime, setServerTime] = useState<string>('');
   const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [pendingVehiclePlatePrefill, setPendingVehiclePlatePrefill] = useState('');
+  const [pendingVehicleReturnToCheckout, setPendingVehicleReturnToCheckout] = useState(false);
+  const [pendingVehicleReturnDraftId, setPendingVehicleReturnDraftId] = useState<string | null>(null);
+  const [pendingOpenAddCustomer, setPendingOpenAddCustomer] = useState(false);
+  const [pendingAddCustomerPlatePrefill, setPendingAddCustomerPlatePrefill] = useState('');
+  const [pendingCheckoutAutofillCustomerId, setPendingCheckoutAutofillCustomerId] = useState('');
+  const [pendingCheckoutAutofillPlate, setPendingCheckoutAutofillPlate] = useState('');
+  const [pendingCheckoutOpenId, setPendingCheckoutOpenId] = useState<string | null>(null);
+  const [pendingServiceLifecycleOpenId, setPendingServiceLifecycleOpenId] = useState<string | null>(null);
+  const [pendingCompletedCheckoutOpenId, setPendingCompletedCheckoutOpenId] = useState<string | null>(null);
   const [pendingTransactionOpenId, setPendingTransactionOpenId] = useState<string | null>(null);
   const [pendingTransactionSearch, setPendingTransactionSearch] = useState<string>('');
   const scannerRef = useRef<Html5Qrcode | null>(null);
 
   const isReadOnly = syncStatus === 'error' || isForcedReadOnly;
+  const isEmployee = authRole === 'employee';
+
+  const canAccessTab = (tab: AppTab): boolean => {
+    if (!isEmployee) return true;
+    if (tab === 'input' || tab === 'memberships') return false;
+    return allowedTabs.includes(tab);
+  };
+
+  const canManageEmployeeUsers = authRole === 'admin';
+  const visibleTabs = useMemo(() => {
+    if (!isEmployee) return ALL_APP_TABS;
+    return ALL_APP_TABS.filter((tab) => canAccessTab(tab));
+  }, [isEmployee, allowedTabs]);
+
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    if (canAccessTab(activeTab)) return;
+    setActiveTab(visibleTabs[0] || 'settings');
+  }, [isLoggedIn, activeTab, visibleTabs]);
+
+  useEffect(() => {
+    if (!isLoggedIn || !isEmployee || !authUsername) return;
+
+    const normalized = authUsername.toLowerCase();
+    const user = employeeUsers.find((item) => item.username.toLowerCase() === normalized);
+    const tabs = employeePermissions
+      .filter((item) => item.username.toLowerCase() === normalized && item.canView)
+      .map((item) => item.pageKey as AppTab);
+
+    if (tabs.length > 0) {
+      setAllowedTabs(tabs);
+    }
+
+    if (user) {
+      setHideFinancialData(user.hideFinancialData);
+    }
+  }, [isLoggedIn, isEmployee, authUsername, employeeUsers, employeePermissions]);
 
   const formatTransactionSyncError = (
     result: {
@@ -284,12 +373,43 @@ const App: React.FC = () => {
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
+
+  useEffect(() => {
+    const body = document.body;
+    const modalSelector = '.fixed.inset-0:not(.pointer-events-none):not([data-modal-ignore="true"])';
+
+    const updateModalLock = () => {
+      const overlays = Array.from(document.querySelectorAll<HTMLElement>(modalSelector));
+      const hasBlockingOverlay = overlays.some((overlay) => {
+        const style = window.getComputedStyle(overlay);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      });
+      body.classList.toggle('modal-lock', hasBlockingOverlay);
+    };
+
+    updateModalLock();
+
+    const observer = new MutationObserver(() => updateModalLock());
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'style'],
+    });
+
+    window.addEventListener('resize', updateModalLock);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateModalLock);
+      body.classList.remove('modal-lock');
+    };
+  }, [isLoggedIn]);
   const [showUndoToast, setShowUndoToast] = useState(false);
   const [currentBranch, setCurrentBranch] = useState("Zhuhai");
   const [showBranchSelector, setShowBranchSelector] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const touchStartRef = useRef<number | null>(null);
   
   const mainRef = useRef<HTMLDivElement>(null);
 
@@ -362,6 +482,20 @@ const App: React.FC = () => {
     return false;
   };
 
+  const ensureRoleCanMutate = (scope: 'transactions' | 'general'): boolean => {
+    if (!isEmployee) return true;
+
+    if (scope === 'transactions') return true;
+
+    alert(language === 'zh' ? '員工帳號無此修改權限' : 'Employee account cannot perform this action');
+    return false;
+  };
+
+  const isIncomeOnlyPayload = (payload: Transaction | Transaction[]): boolean => {
+    const list = Array.isArray(payload) ? payload : [payload];
+    return list.every((item) => item.type === TransactionType.REVENUE);
+  };
+
   const BRANCHES = ["Zhuhai", "Macau", "Hong Kong", "Shenzhen"];
 
   useEffect(() => {
@@ -389,16 +523,6 @@ const App: React.FC = () => {
 
     setCloudConfig(configToUse);
     initSupabase(configToUse);
-    
-    // Check local session
-    const savedSessionId = localStorage.getItem('gardiner_session_id');
-    const savedIsReadOnly = localStorage.getItem('gardiner_readonly') === 'true';
-    if (savedSessionId) {
-      setSessionId(savedSessionId);
-      setIsLoggedIn(true);
-      setIsForcedReadOnly(savedIsReadOnly);
-      loadData(true, configToUse);
-    }
 
     // Auto-sync every 2 minutes
     const autoSaveInterval = setInterval(() => {
@@ -414,8 +538,7 @@ const App: React.FC = () => {
     if (syncStatus === 'error' && isOnline && cloudConfig) {
       console.log('Connection unstable. Starting background reconnection polling...');
       interval = setInterval(() => {
-        // Connection polling: implement if needed with new backend fetch logic
-        // (No-op: removed fetchRemoteTransactions)
+        loadData(false);
       }, 15000); // Poll every 15s to be gentle
     }
     return () => clearInterval(interval);
@@ -459,6 +582,9 @@ const App: React.FC = () => {
     let subCheckoutOrders: any = null;
     let subMembershipTiers: any = null;
     let subCustomerMemberships: any = null;
+    let subChargingRates: any = null;
+    let subChargingSessions: any = null;
+    let subAppointments: any = null;
     if (cloudConfig) {
       subTr = subscribeToTransactions(() => loadData(false));
       subNotes = subscribeToNotes(() => loadData(false));
@@ -471,6 +597,9 @@ const App: React.FC = () => {
       subCheckoutOrders = subscribeToCheckoutOrders(() => loadData(false));
       subMembershipTiers = subscribeToMembershipTiers(() => loadData(false));
       subCustomerMemberships = subscribeToCustomerMemberships(() => loadData(false));
+      subChargingRates = subscribeToChargingRates(() => loadData(false));
+      subChargingSessions = subscribeToChargingSessions(() => loadData(false));
+      subAppointments = subscribeToAppointments(() => loadData(false));
     }
     return () => {
       if (subTr && subTr.unsubscribe) subTr.unsubscribe();
@@ -484,12 +613,15 @@ const App: React.FC = () => {
       if (subCheckoutOrders && subCheckoutOrders.unsubscribe) subCheckoutOrders.unsubscribe();
       if (subMembershipTiers && subMembershipTiers.unsubscribe) subMembershipTiers.unsubscribe();
       if (subCustomerMemberships && subCustomerMemberships.unsubscribe) subCustomerMemberships.unsubscribe();
+      if (subChargingRates && subChargingRates.unsubscribe) subChargingRates.unsubscribe();
+      if (subChargingSessions && subChargingSessions.unsubscribe) subChargingSessions.unsubscribe();
+      if (subAppointments && subAppointments.unsubscribe) subAppointments.unsubscribe();
     };
   }, [cloudConfig]);
 
   // Session Heartbeat and Server Time
   useEffect(() => {
-    if (!isLoggedIn || !sessionId || isForcedReadOnly) return;
+    if (!isLoggedIn || authRole !== 'admin' || !sessionId || isForcedReadOnly) return;
 
     const heartbeat = setInterval(() => {
       const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
@@ -497,7 +629,7 @@ const App: React.FC = () => {
     }, 60 * 1000);
 
     return () => clearInterval(heartbeat);
-  }, [isLoggedIn, sessionId, isForcedReadOnly]);
+  }, [isLoggedIn, authRole, sessionId, isForcedReadOnly]);
 
   useEffect(() => {
     const updateTime = async () => {
@@ -521,12 +653,28 @@ const App: React.FC = () => {
     return () => clearInterval(timeInterval);
   }, []);
 
-  const handleLogin = (sid: string, readOnly: boolean) => {
+  const handleAdminLogin = (sid: string, readOnly: boolean) => {
+    setAuthRole('admin');
+    setAuthUsername('admin');
+    setAllowedTabs([...ALL_APP_TABS]);
+    setHideFinancialData(false);
     setSessionId(sid);
     setIsLoggedIn(true);
     setIsForcedReadOnly(readOnly);
-    localStorage.setItem('gardiner_session_id', sid);
-    localStorage.setItem('gardiner_readonly', readOnly.toString());
+    loadData(true);
+  };
+
+  const handleEmployeeLogin = (username: string, tabs: AppTab[], hideNumbers: boolean) => {
+    const resolvedTabs = tabs.length > 0 ? tabs : [...DEFAULT_EMPLOYEE_PAGE_KEYS];
+
+    setAuthRole('employee');
+    setAuthUsername(username);
+    setAllowedTabs(resolvedTabs);
+    setHideFinancialData(hideNumbers);
+    setSessionId(null);
+    setIsForcedReadOnly(false);
+    setIsLoggedIn(true);
+    setActiveTab(resolvedTabs[0] || 'transactions');
     loadData(true);
   };
 
@@ -536,14 +684,16 @@ const App: React.FC = () => {
 
   const confirmLogout = async () => {
     setShowLogoutConfirm(false);
-    if (sessionId && !isForcedReadOnly) {
+    if (authRole === 'admin' && sessionId && !isForcedReadOnly) {
       await clearAdminSession(sessionId);
     }
     setIsLoggedIn(false);
+    setAuthRole('admin');
+    setAuthUsername('admin');
+    setAllowedTabs([...ALL_APP_TABS]);
+    setHideFinancialData(false);
     setSessionId(null);
     setIsForcedReadOnly(false);
-    localStorage.removeItem('gardiner_session_id');
-    localStorage.removeItem('gardiner_readonly');
   };
 
   const loadData = async (forceLoading = true, overrideConfig?: CloudConfig) => {
@@ -576,8 +726,14 @@ const App: React.FC = () => {
       const { data: cloudAccounts, error: accError } = await fetchRemoteAccounts();
       const { data: cloudDiscounts, error: discountError } = await fetchRemoteDiscounts();
       const { data: cloudCheckoutOrders, error: checkoutOrderError } = await fetchRemoteCheckoutOrders();
+      const { data: cloudExchangeRates, error: exchangeRatesError } = await fetchRemoteExchangeRates();
       const { data: cloudMembershipTiers, error: membershipTierError } = await fetchRemoteMembershipTiers();
       const { data: cloudCustomerMemberships, error: customerMembershipError } = await fetchRemoteCustomerMemberships();
+      const { data: cloudChargingRates, error: chargingRatesError } = await fetchRemoteChargingRates();
+      const { data: cloudChargingSessions, error: chargingSessionsError } = await fetchRemoteChargingSessions();
+      const { data: cloudAppointments, error: appointmentsError } = await fetchRemoteAppointments();
+      const { data: cloudEmployeeUsers, error: employeeUsersError } = await fetchEmployeeUsers();
+      const { data: cloudEmployeePermissions, error: employeePermissionsError } = await fetchEmployeePagePermissions();
       const { data: logsData, error: logsError } = await fetchAuditLogs();
       
       // Transaction error handling removed: handled by new backend logic
@@ -627,6 +783,14 @@ const App: React.FC = () => {
         setCheckoutOrders(cloudCheckoutOrders);
       }
 
+      if (exchangeRatesError) {
+        console.warn('Exchange rates fetch skipped:', exchangeRatesError);
+      }
+
+      if (!exchangeRatesError && cloudExchangeRates !== null && cloudExchangeRates !== undefined) {
+        setExchangeRates(cloudExchangeRates);
+      }
+
       if (membershipTierError) {
         console.warn('Membership tiers fetch skipped:', membershipTierError);
       }
@@ -641,6 +805,38 @@ const App: React.FC = () => {
 
       if (!customerMembershipError && cloudCustomerMemberships !== null && cloudCustomerMemberships !== undefined) {
         setCustomerMemberships(cloudCustomerMemberships);
+      }
+
+      if (chargingRatesError) {
+        console.warn('Charging rates fetch skipped:', chargingRatesError);
+      }
+
+      if (!chargingRatesError && cloudChargingRates !== null && cloudChargingRates !== undefined) {
+        setChargingRates(cloudChargingRates);
+      }
+
+      if (chargingSessionsError) {
+        console.warn('Charging sessions fetch skipped:', chargingSessionsError);
+      }
+
+      if (!chargingSessionsError && cloudChargingSessions !== null && cloudChargingSessions !== undefined) {
+        setChargingSessions(cloudChargingSessions);
+      }
+
+      if (appointmentsError) {
+        console.warn('Appointments fetch skipped:', appointmentsError);
+      }
+
+      if (!appointmentsError && cloudAppointments !== null && cloudAppointments !== undefined) {
+        setAppointments(cloudAppointments);
+      }
+
+      if (!employeeUsersError && cloudEmployeeUsers !== null && cloudEmployeeUsers !== undefined) {
+        setEmployeeUsers(cloudEmployeeUsers);
+      }
+
+      if (!employeePermissionsError && cloudEmployeePermissions !== null && cloudEmployeePermissions !== undefined) {
+        setEmployeePermissions(cloudEmployeePermissions);
       }
       
       if (cloudCategories !== null && cloudCategories !== undefined) {
@@ -702,7 +898,9 @@ const App: React.FC = () => {
       const resCheckoutOrders = await syncRemoteCheckoutOrders(checkoutOrders);
       const resMembershipTiers = await syncRemoteMembershipTiers(membershipTiers);
       const resCustomerMemberships = await syncRemoteCustomerMemberships(customerMemberships);
-      if (resTr.success && resNotes.success && resCats.success && resCust.success && resCustGroups.success && resVehicles.success && resAcc.success && resDiscounts.success && resCheckoutOrders.success && resMembershipTiers.success && resCustomerMemberships.success) {
+      const resChargingRates = await syncRemoteChargingRates(chargingRates);
+      const resChargingSessions = await syncRemoteChargingSessions(chargingSessions);
+      if (resTr.success && resNotes.success && resCats.success && resCust.success && resCustGroups.success && resVehicles.success && resAcc.success && resDiscounts.success && resCheckoutOrders.success && resMembershipTiers.success && resCustomerMemberships.success && resChargingRates.success && resChargingSessions.success) {
         setSyncStatus('cloud');
         setLastSync(new Date());
         setShowSuccessOverlay(true);
@@ -710,7 +908,7 @@ const App: React.FC = () => {
       } else {
         setLastError(
           resTr.success
-            ? (resNotes.error || resCats.error || resCust.error || resCustGroups.error || resVehicles.error || resAcc.error || resDiscounts.error || resCheckoutOrders.error || resMembershipTiers.error || resCustomerMemberships.error || 'Push failed')
+            ? (resNotes.error || resCats.error || resCust.error || resCustGroups.error || resVehicles.error || resAcc.error || resDiscounts.error || resCheckoutOrders.error || resMembershipTiers.error || resCustomerMemberships.error || resChargingRates.error || resChargingSessions.error || 'Push failed')
             : formatTransactionSyncError(resTr, 'Push failed')
         );
         setSyncStatus('error');
@@ -848,7 +1046,79 @@ const App: React.FC = () => {
     loadData(true, config);
   };
 
+  const handleSaveEmployeeUser = async (params: {
+    username: string;
+    password?: string;
+    isActive: boolean;
+    hideFinancialData: boolean;
+  }) => {
+    if (!canManageEmployeeUsers) return;
+    if (!ensureCloudWritable()) return;
+
+    const result = await saveEmployeeUser(params);
+    if (!result.success) {
+      const isSetupError = result.error?.includes('not set up');
+      alert(isSetupError
+        ? (language === 'zh'
+          ? '員工資料表尚未建立。\n請前往「設定」頁面，複製 SQL 腳本並在 Supabase SQL Editor 執行。'
+          : 'Employee tables are not set up yet.\nGo to Settings → copy the SQL script → run it in Supabase SQL Editor.')
+        : (result.error || (language === 'zh' ? '儲存員工失敗' : 'Failed to save employee')));
+      return;
+    }
+
+    logAuditEvent(AuditAction.UPDATE, 'employee_users', params.username, authUsername, undefined, params);
+    await loadData(false);
+  };
+
+  const handleSaveEmployeePermissions = async (username: string, pageKeys: AppTab[]) => {
+    if (!canManageEmployeeUsers) return;
+    if (!ensureCloudWritable()) return;
+
+    const result = await saveEmployeePagePermissions(username, pageKeys);
+    if (!result.success) {
+      const isSetupError = result.error?.includes('not set up');
+      alert(isSetupError
+        ? (language === 'zh'
+          ? '員工資料表尚未建立。\n請前往「設定」頁面，複製 SQL 腳本並在 Supabase SQL Editor 執行。'
+          : 'Employee tables are not set up yet.\nGo to Settings → copy the SQL script → run it in Supabase SQL Editor.')
+        : (result.error || (language === 'zh' ? '儲存權限失敗' : 'Failed to save permissions')));
+      return;
+    }
+
+    const normalizedUsername = username.trim().toLowerCase();
+    const now = new Date().toISOString();
+    const uniquePageKeys = Array.from(new Set(pageKeys));
+
+    // Keep Settings UI in sync even when full loadData refresh is delayed or partially fails.
+    setEmployeePermissions((current) => {
+      const preserved = current.filter((item) => item.username.toLowerCase() !== normalizedUsername);
+      const next = uniquePageKeys.map((pageKey) => ({
+        id: `epp_local_${normalizedUsername}_${pageKey}`,
+        username: normalizedUsername,
+        pageKey: pageKey as EmployeePageKey,
+        canView: true,
+        createdAt: now,
+        updatedAt: now,
+      }));
+      return [...preserved, ...next];
+    });
+
+    logAuditEvent(AuditAction.UPDATE, 'employee_page_permissions', username, authUsername, undefined, { pageKeys });
+
+    const { data: refreshedPermissions } = await fetchEmployeePagePermissions();
+    if (refreshedPermissions) {
+      setEmployeePermissions(refreshedPermissions);
+    } else {
+      await loadData(false);
+    }
+  };
+
   const addTransaction = async (transaction: Transaction | Transaction[], transactionNoteText?: string) => {
+    if (!ensureRoleCanMutate('transactions')) return;
+    if (isEmployee && !isIncomeOnlyPayload(transaction)) {
+      alert(language === 'zh' ? '員工只能新增收入交易' : 'Employees can only add income transactions');
+      return;
+    }
     if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const now = new Date().toISOString();
@@ -946,6 +1216,10 @@ const App: React.FC = () => {
   };
 
   const updateTransaction = async (updatedTr: Transaction, noteText?: string) => {
+    if (isEmployee) {
+      alert(language === 'zh' ? '員工不可編輯交易' : 'Employees cannot edit transactions');
+      return;
+    }
     if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const now = new Date().toISOString();
@@ -1001,6 +1275,10 @@ const App: React.FC = () => {
   };
 
   const bulkUpdateTransactions = async (updatedItems: Transaction[]) => {
+    if (isEmployee) {
+      alert(language === 'zh' ? '員工不可批量編輯交易' : 'Employees cannot bulk edit transactions');
+      return;
+    }
     if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const now = new Date().toISOString();
@@ -1026,6 +1304,10 @@ const App: React.FC = () => {
   };
 
   const deleteTransaction = async (id: string) => {
+    if (isEmployee) {
+      alert(language === 'zh' ? '員工不可刪除交易' : 'Employees cannot delete transactions');
+      return;
+    }
     if (!ensureCloudWritable()) return;
     setIsSyncing(true);
     const trToDelete = transactions.find(t => t.id === id);
@@ -1266,9 +1548,25 @@ const App: React.FC = () => {
     if (!ensureCloudWritable()) return;
     setIsSyncing(true);
 
-    const updatedVehicles = vehicles.some(v => v.id === vehicle.id)
-      ? vehicles.map(v => (v.id === vehicle.id ? vehicle : v))
-      : [vehicle, ...vehicles];
+    const normalizedIncomingPlate = normalizeLicensePlate(vehicle.licensePlate || '');
+    const duplicatePlateVehicle = vehicles.find((candidate) => {
+      if (!candidate.licensePlate) return false;
+      if (candidate.id === vehicle.id) return false;
+      return normalizeLicensePlate(candidate.licensePlate) === normalizedIncomingPlate;
+    });
+
+    const canonicalVehicle: Vehicle = duplicatePlateVehicle
+      ? {
+          ...vehicle,
+          id: duplicatePlateVehicle.id,
+          createdAt: duplicatePlateVehicle.createdAt || vehicle.createdAt,
+          customerId: vehicle.customerId || duplicatePlateVehicle.customerId,
+        }
+      : vehicle;
+
+    const updatedVehicles = vehicles.some(v => v.id === canonicalVehicle.id)
+      ? vehicles.map(v => (v.id === canonicalVehicle.id ? canonicalVehicle : v))
+      : [canonicalVehicle, ...vehicles];
 
     try {
       setSyncStatus('syncing');
@@ -1277,7 +1575,8 @@ const App: React.FC = () => {
       if (result.success) {
         setVehicles(updatedVehicles);
         setSyncStatus('cloud');
-        await loadData(false);
+        setIsSyncing(false);
+        loadData(false);
       } else {
         setLastError(result.error || 'Vehicle sync failed');
         setSyncStatus('error');
@@ -1416,9 +1715,12 @@ const App: React.FC = () => {
       setSyncStatus('syncing');
       const result = await syncRemoteCheckoutOrders(updatedOrders);
       if (result.success) {
-        setCheckoutOrders(updatedOrders);
+        // Only update the affected order(s) in state
+        setCheckoutOrders(prev => {
+          const updatedMap = new Map(updatedOrders.map(o => [o.id, o]));
+          return prev.map(order => updatedMap.get(order.id) || order);
+        });
         setSyncStatus('cloud');
-        await loadData(false);
       } else {
         setLastError(result.error || 'Order sync failed');
         setSyncStatus('error');
@@ -1435,11 +1737,7 @@ const App: React.FC = () => {
     if (!order) return;
 
     const forcedCurrency = getForcedCurrencyForPaymentMethod(paymentMethod);
-    if (forcedCurrency && forcedCurrency !== paymentCurrency) {
-      setLastError(`Cash method ${paymentMethod} requires currency ${forcedCurrency}.`);
-      setSyncStatus('error');
-      return;
-    }
+    const resolvedPaymentCurrency = forcedCurrency || paymentCurrency;
 
     if (order.status !== 'checked_out') {
       setLastError('Only checked-out orders can be marked paid.');
@@ -1448,18 +1746,40 @@ const App: React.FC = () => {
     }
 
     const now = new Date().toISOString();
+    let ratesForPayment = exchangeRates;
+    let appliedRate = getApplicableExchangeRate(ratesForPayment, PaymentCurrency.RMB, resolvedPaymentCurrency);
+    let paymentAmount = convertCurrencyAmount(Number(order.netAmount || 0), ratesForPayment, PaymentCurrency.RMB, resolvedPaymentCurrency);
+
+    if (appliedRate == null || paymentAmount == null) {
+      const { data: latestRates } = await fetchRemoteExchangeRates();
+      if (latestRates && latestRates.length > 0) {
+        ratesForPayment = latestRates;
+        setExchangeRates(latestRates);
+        appliedRate = getApplicableExchangeRate(ratesForPayment, PaymentCurrency.RMB, resolvedPaymentCurrency);
+        paymentAmount = convertCurrencyAmount(Number(order.netAmount || 0), ratesForPayment, PaymentCurrency.RMB, resolvedPaymentCurrency);
+      }
+    }
+
+    if (appliedRate == null || paymentAmount == null) {
+      setLastError(`Missing exchange rate for RMB to ${resolvedPaymentCurrency}.`);
+      setSyncStatus('error');
+      return;
+    }
+
     const paidOrder: CheckoutOrder = {
       ...order,
       paymentStatus: 'paid',
       paymentMethod,
-      paymentCurrency,
+      paymentCurrency: resolvedPaymentCurrency,
       paidAt: now,
-      paidAmount: Math.max(0, Number(order.netAmount || 0)),
+      currency: PaymentCurrency.RMB,
+      paymentAmount,
+      appliedRate,
       updatedAt: now,
     };
 
     const paymentUpdatedOrders = checkoutOrders.map(item => item.id === orderId ? paidOrder : item);
-    const transaction = buildTransactionFromPaidCheckoutOrder(paidOrder, paymentMethod, paymentCurrency);
+    const transaction = buildTransactionFromPaidCheckoutOrder(paidOrder, paymentMethod, resolvedPaymentCurrency);
 
     setIsSyncing(true);
     try {
@@ -1538,6 +1858,77 @@ const App: React.FC = () => {
     }
   };
 
+  const saveChargingRates = async (updatedRates: ChargingRateConfig[]) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+    try {
+      setSyncStatus('syncing');
+      const result = await syncRemoteChargingRates(updatedRates);
+      if (result.success) {
+        setChargingRates(updatedRates);
+        setSyncStatus('cloud');
+        await loadData(false);
+      } else {
+        setLastError(result.error || 'Charging rates sync failed');
+        setSyncStatus('error');
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const saveChargingSessions = async (updatedSessions: ChargingSession[]) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+    try {
+      setSyncStatus('syncing');
+      const result = await syncRemoteChargingSessions(updatedSessions);
+      if (result.success) {
+        setChargingSessions(updatedSessions);
+        setSyncStatus('cloud');
+        await loadData(false);
+      } else {
+        setLastError(result.error || 'Charging sessions sync failed');
+        setSyncStatus('error');
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const createChargingTransactions = async (newTransactions: Transaction[]) => {
+    if (!ensureRoleCanMutate('transactions')) return false;
+    if (!ensureCloudWritable()) return false;
+
+    if (isEmployee && !isIncomeOnlyPayload(newTransactions)) {
+      alert(language === 'zh' ? '員工只能新增收入交易' : 'Employees can only add income transactions');
+      return false;
+    }
+
+    setIsSyncing(true);
+    try {
+      setSyncStatus('syncing');
+      const rows = newTransactions.map((transaction) => ({
+        ...transaction,
+        updatedAt: transaction.updatedAt || new Date().toISOString(),
+      }));
+      const result = await syncRemoteTransactions(rows);
+      if (!result.success) {
+        const errorMessage = formatTransactionSyncError(result, 'Charging transaction sync failed');
+        setLastError(errorMessage);
+        setSyncStatus('error');
+        return false;
+      }
+
+      setSyncStatus('cloud');
+      setLastSync(new Date());
+      await loadData(false);
+      return true;
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   const handleDeleteCheckoutOrder = async (orderId: string) => {
     if (!ensureCloudWritable()) return;
     setIsSyncing(true);
@@ -1552,39 +1943,129 @@ const App: React.FC = () => {
     }
   };
 
+  const saveAppointments = async (updatedAppointments: Appointment[]) => {
+    if (!ensureCloudWritable()) return;
+    setIsSyncing(true);
+    try {
+      setSyncStatus('syncing');
+      const result = await syncRemoteAppointments(updatedAppointments);
+      if (result.success) {
+        setAppointments(updatedAppointments);
+        setSyncStatus('cloud');
+        await loadData(false);
+      } else {
+        setLastError(result.error || 'Appointments sync failed');
+        setSyncStatus('error');
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleConvertAppointmentToCheckout = async (appointment: Appointment) => {
+    if (!ensureCloudWritable()) return;
+
+    const latestAppointment = appointments.find(item => item.id === appointment.id) || appointment;
+    if (latestAppointment.linkedCheckoutOrderId) {
+      const linkedOrder = checkoutOrders.find(order => order.id === latestAppointment.linkedCheckoutOrderId);
+
+      if (!linkedOrder || linkedOrder.status === CheckoutOrderStatus.DRAFT) {
+        setPendingCheckoutOpenId(latestAppointment.linkedCheckoutOrderId);
+        setPendingServiceLifecycleOpenId(null);
+        setPendingCompletedCheckoutOpenId(null);
+        setActiveTab('checkout');
+        return;
+      }
+
+      if (linkedOrder.status === CheckoutOrderStatus.CHECKED_OUT) {
+        setPendingCompletedCheckoutOpenId(linkedOrder.id);
+        setPendingServiceLifecycleOpenId(null);
+        setPendingCheckoutOpenId(null);
+        setActiveTab('completed_checkout');
+        return;
+      }
+
+      setPendingServiceLifecycleOpenId(linkedOrder.id);
+      setPendingCompletedCheckoutOpenId(null);
+      setPendingCheckoutOpenId(null);
+      setActiveTab('service_lifecycle');
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const lines: CheckoutOrderLine[] = appointment.serviceCategoryIds.map(catId => {
+      const cat = categories.find(c => c.id === catId);
+      return {
+        id: crypto.randomUUID(),
+        saleId: '',
+        categoryId: catId,
+        name: cat?.name ?? catId,
+        quantity: 1,
+        unitPrice: cat?.price ?? 0,
+        lineSubtotal: cat?.price ?? 0,
+        estimatedDurationMinutes: cat?.estimatedDurationMinutes,
+        isDiscount: false,
+        createdAt: now,
+      };
+    });
+    const grossAmount = lines.reduce((sum, l) => sum + l.lineSubtotal, 0);
+    const newOrderId = crypto.randomUUID();
+    const newOrder: CheckoutOrder = {
+      id: newOrderId,
+      customerId: latestAppointment.customerId,
+      vehicleId: latestAppointment.vehicleId,
+      status: CheckoutOrderStatus.DRAFT,
+      grossAmount,
+      membershipDiscountAmount: 0,
+      couponDiscountAmount: 0,
+      netAmount: grossAmount,
+      estimatedDurationMinutes: lines.reduce((sum, l) => sum + (l.estimatedDurationMinutes ?? 0), 0),
+      currency: PaymentCurrency.HKD,
+      createdAt: now,
+      lines,
+    };
+
+    const updatedAppointments = appointments.map(item => {
+      if (item.id !== latestAppointment.id) return item;
+      return {
+        ...item,
+        linkedCheckoutOrderId: newOrderId,
+        convertedAt: now,
+        updatedAt: now,
+      };
+    });
+
+    setIsSyncing(true);
+    setSyncStatus('syncing');
+    try {
+      const [orderResult, appointmentResult] = await Promise.all([
+        syncRemoteCheckoutOrders([newOrder, ...checkoutOrders]),
+        syncRemoteAppointments(updatedAppointments),
+      ]);
+
+      if (!orderResult.success || !appointmentResult.success) {
+        setLastError(orderResult.error || appointmentResult.error || 'Conversion sync failed');
+        setSyncStatus('error');
+        return;
+      }
+
+      setCheckoutOrders([newOrder, ...checkoutOrders]);
+      setAppointments(updatedAppointments);
+      setPendingCheckoutOpenId(newOrderId);
+      setPendingServiceLifecycleOpenId(null);
+      setPendingCompletedCheckoutOpenId(null);
+      setSyncStatus('cloud');
+      setLastSync(new Date());
+      setActiveTab('checkout');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   const dueRemindersCount = useMemo(() => {
     const today = new Date().toISOString().split('T')[0];
     return notes.filter(n => n.reminderDate && n.reminderDate <= today).length;
   }, [notes]);
-
-  const handleTouchStart = (e: React.TouchEvent) => {
-    if (mainRef.current && mainRef.current.scrollTop === 0) {
-      touchStartRef.current = e.touches[0].clientY;
-    }
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (touchStartRef.current !== null && mainRef.current && mainRef.current.scrollTop === 0) {
-      const currentY = e.touches[0].clientY;
-      const distance = currentY - touchStartRef.current;
-      if (distance > 0) {
-        setPullDistance(Math.min(distance, 100));
-      }
-    }
-  };
-
-  const handleTouchEnd = () => {
-    if (pullDistance > 80) {
-      setIsRefreshing(true);
-      loadData(true).finally(() => {
-        setIsRefreshing(false);
-        setPullDistance(0);
-      });
-    } else {
-      setPullDistance(0);
-    }
-    touchStartRef.current = null;
-  };
 
   const summary: FinancialSummary = useMemo(() => {
     // Helper to sum items by filter
@@ -1706,9 +2187,9 @@ const App: React.FC = () => {
     <ErrorBoundary>
       <div id="app-root-check" style={{ display: 'none' }}>App Mounted</div>
       {!isLoggedIn ? (
-        <LoginPage onLogin={handleLogin} language={language} />
+        <LoginPage onAdminLogin={handleAdminLogin} onEmployeeLogin={handleEmployeeLogin} language={language} />
       ) : (
-        <div className={`min-h-screen flex flex-col md:flex-row bg-slate-50 dark:bg-black font-sans selection:bg-blue-900/30 transition-colors duration-500`}>
+        <div data-app-shell="true" className={`min-h-screen flex flex-col md:flex-row bg-slate-50 dark:bg-black font-sans selection:bg-blue-900/30 transition-colors duration-500`}>
             {showSuccessOverlay && (
         <div className="fixed top-6 right-6 z-[200] bg-emerald-500 text-white px-6 py-3 rounded-2xl shadow-2xl animate-bounce font-black text-xs uppercase tracking-widest flex items-center gap-2">
           <i className="fas fa-check-circle"></i> {t.syncReady}
@@ -1811,8 +2292,8 @@ const App: React.FC = () => {
       </AnimatePresence>
 
       {/* Sidebar - Desktop */}
-      <aside className="hidden md:flex w-72 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-white/5 flex-col p-6 sticky top-0 h-screen z-30">
-        <div className="flex items-center space-x-3 mb-10 px-2">
+      <aside className="hidden md:flex w-64 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-white/5 flex-col p-4 sticky top-0 h-[100dvh] z-30">
+        <div className="flex items-center space-x-3 mb-6 px-1">
           <div className="relative">
             <div className="w-24 h-12 bg-white rounded-sm flex items-center justify-center shadow-lg shadow-black/5 overflow-hidden border border-slate-100 dark:bg-white">
               <div className="flex flex-col items-center justify-center leading-none">
@@ -1842,51 +2323,63 @@ const App: React.FC = () => {
           </div>
         </div>
         
-        <nav className="flex-1 space-y-1.5">
-          <button onClick={() => setActiveTab('overview')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'overview' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+        <nav className="flex-1 min-h-0 overflow-y-auto space-y-1 pr-1">
+          {canAccessTab('overview') && <button onClick={() => setActiveTab('overview')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'overview' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-chart-pie w-5"></i>
             <span>{t.overview}</span>
-          </button>
-          <button onClick={() => setActiveTab('balance')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'balance' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+          </button>}
+          {canAccessTab('balance') && <button onClick={() => setActiveTab('balance')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'balance' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-wallet w-5"></i>
             <span>{t.accountBalance}</span>
-          </button>
-          <button onClick={() => setActiveTab('transactions')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'transactions' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+          </button>}
+          {canAccessTab('transactions') && <button onClick={() => setActiveTab('transactions')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'transactions' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-list-ul w-5"></i>
             <span>{t.transactions}</span>
-          </button>
-          <button onClick={() => setActiveTab('checkout')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'checkout' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
-            <i className="fas fa-cash-register w-5"></i>
-            <span>{t.checkout}</span>
-          </button>
-          <button onClick={() => setActiveTab('startup')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'startup' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+          </button>}
+          {canAccessTab('startup') && <button onClick={() => setActiveTab('startup')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'startup' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-rocket w-5"></i>
             <span>{t.investmentOverview}</span>
-          </button>
-          <button onClick={() => setActiveTab('notes')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'notes' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+          </button>}
+          {canAccessTab('notes') && <button onClick={() => setActiveTab('notes')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'notes' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-sticky-note w-5"></i>
             <span>{t.notes}</span>
-          </button>
-          <button onClick={() => setActiveTab('customers')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'customers' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+          </button>}
+          {canAccessTab('customers') && <button onClick={() => setActiveTab('customers')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'customers' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-users w-5"></i>
             <span>{language === 'zh' ? '客戶追蹤' : 'Customers'}</span>
-          </button>
-          <button onClick={() => setActiveTab('vehicles')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'vehicles' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+          </button>}
+          {canAccessTab('vehicles') && <button onClick={() => setActiveTab('vehicles')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'vehicles' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-car-side w-5"></i>
             <span>{language === 'zh' ? '車輛管理' : 'Vehicles'}</span>
-          </button>
-          <button onClick={() => setActiveTab('memberships')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'memberships' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+          </button>}
+          {canAccessTab('memberships') && <button onClick={() => setActiveTab('memberships')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'memberships' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-id-badge w-5"></i>
             <span>{language === 'zh' ? '會員方案' : 'Memberships'}</span>
-          </button>
-          <button onClick={() => setActiveTab('settings')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'settings' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+          </button>}
+          {canAccessTab('completed_checkout') && <button onClick={() => setActiveTab('completed_checkout')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'completed_checkout' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+            <i className="fas fa-clipboard-check w-5"></i>
+            <span>{language === 'zh' ? '已完成訂單' : 'Completed Checkout'}</span>
+          </button>}
+          {canAccessTab('service_lifecycle') && <button onClick={() => setActiveTab('service_lifecycle')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'service_lifecycle' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+            <i className="fas fa-car-side w-5"></i>
+            <span>{language === 'zh' ? '服務進度' : 'Service Life Cycle'}</span>
+          </button>}
+          {canAccessTab('charging') && <button onClick={() => setActiveTab('charging')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'charging' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+            <i className="fas fa-bolt w-5"></i>
+            <span>{language === 'zh' ? '充電服務' : 'Charging Service'}</span>
+          </button>}
+          {canAccessTab('appointments') && <button onClick={() => setActiveTab('appointments')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'appointments' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+            <i className="fas fa-calendar-alt w-5"></i>
+            <span>{language === 'zh' ? '預約管理' : 'Appointments'}</span>
+          </button>}
+          {canAccessTab('settings') && <button onClick={() => setActiveTab('settings')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'settings' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-cog w-5"></i>
             <span>{t.settings}</span>
-          </button>
+          </button>}
         </nav>
 
-        <div className="mt-auto pt-6 border-t border-slate-100 dark:border-white/5 space-y-4">
-          <div className="bg-slate-50 dark:bg-white/5 rounded-2xl p-4 space-y-3">
+        <div className="mt-4 pt-4 border-t border-slate-100 dark:border-white/5 space-y-3">
+          <div className="bg-slate-50 dark:bg-white/5 rounded-2xl p-3 space-y-2.5">
             <div className="flex items-center justify-between">
               <span className="flex items-center text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest">
                 <div className={`w-1.5 h-1.5 rounded-full mr-2 ${syncStatus === 'syncing' ? 'bg-blue-400 animate-pulse' : syncStatus === 'cloud' ? 'bg-emerald-400' : syncStatus === 'error' ? 'bg-rose-400' : 'bg-slate-300'}`}></div>
@@ -1909,7 +2402,7 @@ const App: React.FC = () => {
             <div className="flex gap-2 pt-1">
               <button 
                 onClick={pushAllData} 
-                disabled={syncStatus === 'syncing' || !cloudConfig || isReadOnly} 
+                disabled={syncStatus === 'syncing' || !cloudConfig || isReadOnly || isEmployee} 
                 className={`w-full h-9 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 hover:bg-blue-600 hover:text-white border border-slate-200 dark:border-white/10 rounded-xl flex items-center justify-center transition-all group shadow-sm active:scale-95 relative ${isReadOnly ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
                 <i className="fas fa-sync-alt text-xs mr-2"></i>
@@ -1934,22 +2427,22 @@ const App: React.FC = () => {
             </div>
           </div>
           <div className="flex gap-2">
-            <button 
+            {canAccessTab('input') && <button 
               onClick={() => setActiveTab('input')} 
-              disabled={isReadOnly}
-              className={`flex-1 flex items-center justify-center space-x-2 px-4 py-4 rounded-2xl transition-all shadow-lg active:scale-95 ${isReadOnly ? 'opacity-50 grayscale cursor-not-allowed' : ''} ${activeTab === 'input' ? 'bg-blue-600 text-white shadow-blue-600/20' : 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 shadow-slate-900/20 dark:shadow-white/10'}`}
+              disabled={isReadOnly || !canAccessTab('input')}
+              className={`flex-1 flex items-center justify-center space-x-2 px-3 py-3 rounded-2xl transition-all shadow-lg active:scale-95 ${isReadOnly ? 'opacity-50 grayscale cursor-not-allowed' : ''} ${activeTab === 'input' ? 'bg-blue-600 text-white shadow-blue-600/20' : 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 shadow-slate-900/20 dark:shadow-white/10'}`}
             >
               <i className="fas fa-receipt text-lg"></i>
-              <span className="text-xs uppercase tracking-widest font-black">{language === 'zh' ? '新增交易記錄' : 'Add Transaction'}</span>
-            </button>
-            <button 
+              <span className="text-[11px] uppercase tracking-widest font-black">{language === 'zh' ? '新增交易記錄' : 'Add Transaction'}</span>
+            </button>}
+            {canAccessTab('checkout') && <button 
               onClick={() => setActiveTab('checkout')} 
-              disabled={isReadOnly}
-              className={`flex-1 flex items-center justify-center space-x-2 px-4 py-4 rounded-2xl transition-all shadow-lg active:scale-95 ${isReadOnly ? 'opacity-50 grayscale cursor-not-allowed' : ''} ${activeTab === 'checkout' ? 'bg-blue-600 text-white shadow-blue-600/20' : 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 shadow-slate-900/20 dark:shadow-white/10'}`}
+              disabled={isReadOnly || !canAccessTab('checkout')}
+              className={`flex-1 flex items-center justify-center space-x-2 px-3 py-3 rounded-2xl transition-all shadow-lg active:scale-95 ${isReadOnly ? 'opacity-50 grayscale cursor-not-allowed' : ''} ${activeTab === 'checkout' ? 'bg-blue-600 text-white shadow-blue-600/20' : 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 shadow-slate-900/20 dark:shadow-white/10'}`}
             >
               <i className="fas fa-shopping-bag text-lg"></i>
-              <span className="text-xs uppercase tracking-widest font-black">{language === 'zh' ? '銷售草稿' : 'Sale Draft'}</span>
-            </button>
+              <span className="text-[11px] uppercase tracking-widest font-black">{language === 'zh' ? '新銷售' : 'New Sale'}</span>
+            </button>}
           </div>
         </div>
       </aside>
@@ -1976,8 +2469,12 @@ const App: React.FC = () => {
                   activeTab === 'input' ? (language === 'zh' ? '新增交易記錄' : 'Add Transaction') : 
                   activeTab === 'customers' ? (language === 'zh' ? '客戶追蹤' : 'Customers') : 
                   activeTab === 'vehicles' ? (language === 'zh' ? '車輛管理' : 'Vehicles') : 
+                  activeTab === 'charging' ? (language === 'zh' ? '充電服務' : 'Charging Service') : 
+                  activeTab === 'appointments' ? (language === 'zh' ? '預約管理' : 'Appointments') : 
                   activeTab === 'memberships' ? (language === 'zh' ? '會員方案' : 'Memberships') : 
-                  activeTab === 'categories' ? (language === 'zh' ? 'Categories' : 'Categories') : 
+                  activeTab === 'categories' ? (language === 'zh' ? '服務類別' : 'Categories') : 
+                  activeTab === 'service_lifecycle' ? (language === 'zh' ? '服務進度' : 'Service Life Cycle') : 
+                  activeTab === 'completed_checkout' ? (language === 'zh' ? '已完成訂單' : 'Completed Checkout') : 
                   (t[activeTab as keyof typeof t] || activeTab)
                 )}
               </h1>
@@ -1993,7 +2490,7 @@ const App: React.FC = () => {
             </button>
             <button 
               onClick={pushAllData}
-              disabled={isReadOnly || syncStatus === 'syncing'}
+              disabled={isReadOnly || syncStatus === 'syncing' || isEmployee}
               className={`w-10 h-10 rounded-full flex items-center justify-center active:scale-90 transition-all ${isReadOnly ? 'opacity-50 grayscale cursor-not-allowed' : ''} ${syncStatus === 'syncing' ? 'bg-blue-100 text-blue-600 animate-spin' : 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400'}`}
             >
               <i className="fas fa-sync-alt text-sm"></i>
@@ -2030,17 +2527,21 @@ const App: React.FC = () => {
             </div>
             {[
               { id: 'input', icon: 'fa-receipt', label: language === 'zh' ? '新增交易記錄' : 'Add Transaction' },
-              { id: 'checkout', icon: 'fa-shopping-cart', label: language === 'zh' ? 'Orders' : 'Orders' },
-              { id: 'transactions', icon: 'fa-chart-bar', label: language === 'zh' ? 'Reports' : 'Reports' },
-              { id: 'overview', icon: 'fa-chart-pie', label: language === 'zh' ? 'Dashboard' : 'Dashboard' },
-              { id: 'notes', icon: 'fa-sticky-note', label: language === 'zh' ? 'Notes' : 'Notes' },
-              { id: 'categories', icon: 'fa-box', label: language === 'zh' ? 'Categories' : 'Categories' },
-              { id: 'customers', icon: 'fa-users', label: language === 'zh' ? 'Customers' : 'Customers' },
-              { id: 'vehicles', icon: 'fa-car-side', label: language === 'zh' ? 'Vehicles' : 'Vehicles' },
-              { id: 'memberships', icon: 'fa-id-badge', label: language === 'zh' ? 'Memberships' : 'Memberships' },
-              { id: 'audit', icon: 'fa-users-cog', label: language === 'zh' ? 'Team' : 'Team' },
-              { id: 'settings', icon: 'fa-cog', label: language === 'zh' ? 'Settings' : 'Settings' },
-            ].map(item => (
+              { id: 'checkout', icon: 'fa-shopping-cart', label: language === 'zh' ? '新銷售' : 'New Sale' },
+              { id: 'completed_checkout', icon: 'fa-clipboard-check', label: language === 'zh' ? '已完成訂單' : 'Completed Checkout' },
+              { id: 'service_lifecycle', icon: 'fa-car-side', label: language === 'zh' ? '服務進度' : 'Service Life Cycle' },
+              { id: 'charging', icon: 'fa-bolt', label: language === 'zh' ? '充電服務' : 'Charging Service' },
+              { id: 'appointments', icon: 'fa-calendar-alt', label: language === 'zh' ? '預約管理' : 'Appointments' },
+              { id: 'transactions', icon: 'fa-chart-bar', label: language === 'zh' ? '報表' : 'Reports' },
+              { id: 'overview', icon: 'fa-chart-pie', label: language === 'zh' ? '主頁' : 'Dashboard' },
+              { id: 'notes', icon: 'fa-sticky-note', label: language === 'zh' ? '備忘錄' : 'Notes' },
+              { id: 'categories', icon: 'fa-box', label: language === 'zh' ? '服務類別' : 'Categories' },
+              { id: 'customers', icon: 'fa-users', label: language === 'zh' ? '客戶管理' : 'Customers' },
+              { id: 'vehicles', icon: 'fa-car-side', label: language === 'zh' ? '車輛管理' : 'Vehicles' },
+              { id: 'memberships', icon: 'fa-id-badge', label: language === 'zh' ? '會員方案' : 'Memberships' },
+              { id: 'audit', icon: 'fa-users-cog', label: language === 'zh' ? '員工管理' : 'Team' },
+              { id: 'settings', icon: 'fa-cog', label: language === 'zh' ? '設置' : 'Settings' },
+            ].filter(item => canAccessTab(item.id as AppTab)).map(item => (
               <button
                 key={item.id}
                 onClick={() => {
@@ -2116,7 +2617,7 @@ const App: React.FC = () => {
             {isMenuOpen && [
               { id: 'input-transaction', icon: 'fa-receipt', label: language === 'zh' ? '新增交易記錄' : 'Add Transaction Record' },
               { id: 'input-sale', icon: 'fa-shopping-bag', label: language === 'zh' ? '新增銷售草稿' : 'Add Sale Draft' },
-            ].map((item, index, arr) => {
+            ].filter(item => (item.id === 'input-transaction' ? canAccessTab('input') : canAccessTab('checkout'))).map((item, index, arr) => {
               const radius = 130;
               const startAngle = (210 * Math.PI) / 180;
               const endAngle = (330 * Math.PI) / 180;
@@ -2155,11 +2656,11 @@ const App: React.FC = () => {
 
           <div className="absolute left-1/2 bottom-0 -translate-x-1/2 w-[280px] h-14 rounded-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-slate-200 dark:border-white/10 shadow-2xl shadow-slate-900/15 pointer-events-auto flex items-center justify-between px-6">
             <button
-              onClick={() => { setActiveTab('overview'); setIsMenuOpen(false); }}
-              className={`w-10 h-10 rounded-full flex items-center justify-center transition-all active:scale-95 ${activeTab === 'overview' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300'}`}
-              title={t.overview}
+              onClick={() => { setActiveTab('service_lifecycle'); setIsMenuOpen(false); }}
+              className={`w-10 h-10 rounded-full flex items-center justify-center transition-all active:scale-95 ${activeTab === 'service_lifecycle' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300'}`}
+              title={language === 'zh' ? '服務進度' : 'Service Life Cycle'}
             >
-              <i className="fas fa-chart-pie text-base"></i>
+              <i className="fas fa-car-side text-base"></i>
             </button>
 
             <div className="w-14"></div>
@@ -2264,20 +2765,7 @@ const App: React.FC = () => {
       <main 
         ref={mainRef} 
         className="flex-1 overflow-y-auto pb-32 md:pb-0 relative"
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
       >
-        {/* Pull to refresh indicator */}
-        <div 
-          className="absolute top-0 left-0 right-0 flex items-center justify-center overflow-hidden transition-all pointer-events-none"
-          style={{ height: pullDistance }}
-        >
-          <div className={`flex items-center gap-2 ${pullDistance > 80 ? 'text-blue-600' : 'text-slate-300'}`}>
-            <i className={`fas fa-sync-alt ${isRefreshing ? 'animate-spin' : ''} ${pullDistance > 80 ? 'rotate-180' : ''} transition-transform`}></i>
-            <span className="text-[10px] font-black uppercase tracking-widest">{isRefreshing ? t.syncing : t.pullToRefresh}</span>
-          </div>
-        </div>
         <AnimatePresence mode="wait">
           {syncStatus === 'syncing' ? (
             <LoadingScreen language={language} />
@@ -2330,13 +2818,17 @@ const App: React.FC = () => {
                   onExportJSON={exportToJSON} 
                   language={language} 
                   isSyncing={isSyncing} 
-                  isReadOnly={isReadOnly}
+                  isReadOnly={isReadOnly || isEmployee}
+                  isConnectionError={isReadOnly && !isForcedReadOnly}
+                  hideFinancialData={hideFinancialData}
+                  filter={isEmployee ? ((tr) => tr.type === TransactionType.REVENUE) : undefined}
                   openTransactionId={pendingTransactionOpenId}
                   initialSearchTerm={pendingTransactionSearch}
                   onOpenTransactionHandled={() => {
                     setPendingTransactionOpenId(null);
                     setPendingTransactionSearch('');
                   }}
+                  onRetryConnection={syncStatus === 'error' ? () => loadData(true) : undefined}
                 />
               )}
               {activeTab === 'checkout' && (
@@ -2348,9 +2840,86 @@ const App: React.FC = () => {
                   customerMemberships={customerMemberships}
                   discounts={discounts}
                   checkoutOrders={checkoutOrders}
+                  exchangeRates={exchangeRates}
                   onSaveOrders={saveCheckoutOrders}
                   onMarkOrderPaid={markCheckoutOrderPaid}
                   onDeleteOrder={handleDeleteCheckoutOrder}
+                  initialDraftOrderId={pendingCheckoutOpenId}
+                  onInitialDraftOrderHandled={() => setPendingCheckoutOpenId(null)}
+                  isReadOnly={isReadOnly}
+                  onNavigateToVehicles={(licensePlate, draftOrderId) => {
+                    setPendingVehiclePlatePrefill((licensePlate || '').trim().toUpperCase());
+                    setPendingVehicleReturnToCheckout(true);
+                    setPendingVehicleReturnDraftId(draftOrderId || null);
+                    setActiveTab('vehicles');
+                  }}
+                  onNavigateToCustomers={() => setActiveTab('customers')}
+                  onNavigateToAddCustomer={licensePlate => {
+                    setPendingOpenAddCustomer(true);
+                    setPendingAddCustomerPlatePrefill((licensePlate || '').trim().toUpperCase());
+                    setActiveTab('customers');
+                  }}
+                  onNavigateToServiceLifeCycle={() => setActiveTab('service_lifecycle')}
+                  prefillCustomerId={pendingCheckoutAutofillCustomerId}
+                  prefillLicensePlate={pendingCheckoutAutofillPlate}
+                  onPrefillConsumed={() => {
+                    setPendingCheckoutAutofillCustomerId('');
+                    setPendingCheckoutAutofillPlate('');
+                  }}
+                />
+              )}
+              {activeTab === 'completed_checkout' && (
+                <CompletedCheckoutPage
+                  language={language}
+                  customers={customers}
+                  vehicles={vehicles}
+                  customerMemberships={customerMemberships}
+                  discounts={discounts}
+                  checkoutOrders={checkoutOrders}
+                  exchangeRates={exchangeRates}
+                  onMarkOrderPaid={markCheckoutOrderPaid}
+                  onDeleteOrder={handleDeleteCheckoutOrder}
+                  initialOpenOrderId={pendingCompletedCheckoutOpenId}
+                  onInitialOpenOrderHandled={() => setPendingCompletedCheckoutOpenId(null)}
+                  isReadOnly={isReadOnly}
+                />
+              )}
+              {activeTab === 'service_lifecycle' && (
+                <ServiceLifeCyclePage
+                  language={language}
+                  checkoutOrders={checkoutOrders}
+                  customers={customers}
+                  vehicles={vehicles}
+                  onSaveOrders={saveCheckoutOrders}
+                  initialOpenOrderId={pendingServiceLifecycleOpenId}
+                  onInitialOpenOrderHandled={() => setPendingServiceLifecycleOpenId(null)}
+                  isReadOnly={isReadOnly}
+                />
+              )}
+              {activeTab === 'charging' && (
+                <ChargingPage
+                  language={language}
+                  customers={customers}
+                  vehicles={vehicles}
+                  categories={categories}
+                  chargingSessions={chargingSessions}
+                  chargingRates={chargingRates}
+                  onSaveSessions={saveChargingSessions}
+                  onSaveRates={saveChargingRates}
+                  onCreateTransactions={createChargingTransactions}
+                  isReadOnly={isReadOnly}
+                />
+              )}
+              {activeTab === 'appointments' && (
+                <AppointmentsPage
+                  language={language}
+                  appointments={appointments}
+                  customers={customers}
+                  vehicles={vehicles}
+                  categories={categories}
+                  checkoutOrders={checkoutOrders}
+                  onSaveAppointments={saveAppointments}
+                  onConvertToCheckout={handleConvertAppointmentToCheckout}
                   isReadOnly={isReadOnly}
                 />
               )}
@@ -2390,6 +2959,18 @@ const App: React.FC = () => {
                   onDeleteCustomerGroup={handleDeleteCustomerGroup}
                   language={language}
                   isReadOnly={isReadOnly}
+                  hideFinancialData={hideFinancialData}
+                  openAddCustomerOnMount={pendingOpenAddCustomer}
+                  addCustomerPrefillLicensePlate={pendingAddCustomerPlatePrefill}
+                  onOpenAddCustomerConsumed={() => {
+                    setPendingOpenAddCustomer(false);
+                    setPendingAddCustomerPlatePrefill('');
+                  }}
+                  onSaveAndAutofillCheckout={(customerId, licensePlate) => {
+                    setPendingCheckoutAutofillCustomerId((customerId || '').trim());
+                    setPendingCheckoutAutofillPlate((licensePlate || '').trim().toUpperCase());
+                    setActiveTab('checkout');
+                  }}
                 />
               )}
               {activeTab === 'vehicles' && (
@@ -2401,6 +2982,29 @@ const App: React.FC = () => {
                   onDeleteVehicle={handleDeleteVehicle}
                   language={language}
                   isReadOnly={isReadOnly}
+                  prefillLicensePlate={pendingVehiclePlatePrefill}
+                  onPrefillLicensePlateConsumed={() => setPendingVehiclePlatePrefill('')}
+                  returnToCheckoutOnSave={pendingVehicleReturnToCheckout}
+                  onReturnToCheckoutAfterSave={(licensePlate, customerId) => {
+                    setPendingCheckoutOpenId(pendingVehicleReturnDraftId);
+                    setPendingCheckoutAutofillPlate((licensePlate || '').trim().toUpperCase());
+                    setPendingCheckoutAutofillCustomerId((customerId || '').trim());
+                    setPendingVehicleReturnToCheckout(false);
+                    setPendingVehicleReturnDraftId(null);
+                    setPendingVehiclePlatePrefill('');
+                    setActiveTab('checkout');
+                  }}
+                  onNavigateToAddCustomer={licensePlate => {
+                    if (pendingVehicleReturnToCheckout && pendingVehicleReturnDraftId) {
+                      setPendingCheckoutOpenId(pendingVehicleReturnDraftId);
+                    }
+                    setPendingVehicleReturnToCheckout(false);
+                    setPendingVehicleReturnDraftId(null);
+                    setPendingVehiclePlatePrefill('');
+                    setPendingOpenAddCustomer(true);
+                    setPendingAddCustomerPlatePrefill((licensePlate || '').trim().toUpperCase());
+                    setActiveTab('customers');
+                  }}
                 />
               )}
               {activeTab === 'memberships' && (
@@ -2424,6 +3028,7 @@ const App: React.FC = () => {
                   accounts={accounts}
                   isSyncing={isSyncing}
                   isReadOnly={isReadOnly}
+                  onlyRevenueMode={isEmployee}
                 />
               )}
               {activeTab === 'settings' && (
@@ -2443,6 +3048,13 @@ const App: React.FC = () => {
                   categories={categories}
                   onSaveCategories={saveCategories}
                   onDeleteCategory={deleteCategory}
+                  isReadOnly={isReadOnly || isEmployee}
+                  isAdmin={canManageEmployeeUsers}
+                  employeeUsers={employeeUsers}
+                  employeePermissions={employeePermissions}
+                  onSaveEmployeeUser={handleSaveEmployeeUser}
+                  onSaveEmployeePermissions={handleSaveEmployeePermissions}
+                  allPageOptions={ALL_APP_TABS}
                 />
               )}
             </motion.div>

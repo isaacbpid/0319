@@ -183,7 +183,7 @@ begin
 end;
 $$;
 
-drop trigger if exists trg_enforce_discount_vehicle_rules on customer_discount_vehicles;
+drop trigger if exists trg_en force_discount_vehicle_rules on customer_discount_vehicles;
 create trigger trg_enforce_discount_vehicle_rules
 before insert or update on customer_discount_vehicles
 for each row execute function enforce_discount_vehicle_rules();

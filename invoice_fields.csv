@@ -1,20 +1,20 @@
 ﻿Field name,X,Y,font size,alignment,example
 Date,215,25,10,center,3/1/2026
-Invoice number,30,40,10,center,2600001
-Drop off time,60,40,10,center,3/1/2026 10:00
-License plate,100,40,10,center,CYFS 188
-Customer name,140,40,10,center,Chan Tai Man
-Payment Currency,180,40,10,center,RMB
-membership tier,215,40,10,center,GUEST
-contact thru,30,55,10,center,Chan Tai Man
-expected pick up time,60,55,10,center,3/1/2026 12:00
-Car Make ,100,55,10,center,Toyota RAV4
-contact method,140,55,10,center,SMS
-Payment Method,180,55,10,center,Cash_RMB
-Reward Balance,215,55,10,center,20
+Invoice number,30,38,10,center,2600001
+Drop off time,60,38,10,center,3/1/2026 10:00
+License plate,100,38,10,center,CYFS 188
+Customer name,140,38,10,center,Chan Tai Man
+Payment Currency,175,38,10,center,RMB
+membership tier,210,38,10,center,GUEST
+contact thru,30,52,10,center,23411121
+expected pick up time,60,52,10,center,3/1/2026 12:00
+Car Make ,100,52,10,center,Toyota RAV4
+contact method,140,52,10,center,SMS
+Payment Method,175,52,10,center,Cash_RMB
+Reward Balance,210,52,10,center,20
 Line item description,30,75,10,right,Car Wash
 Qty,120,75,10,center,1
-Unit price,110,75,10,center,135
-Amount,140,75,10,center,135
-Total,140,125,10,center,135
-Notes,20,145,10,center,lite scratch on door
+Unit price,100,75,10,right,135
+Amount,135,75,10,right,135
+Total,135,125,10,right,135
+Notes,20,145,10,right,lite scratch on door

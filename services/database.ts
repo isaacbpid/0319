@@ -1,10 +1,11 @@
 
 import { createClient } from '@supabase/supabase-js';
-import { Transaction, TransactionType, CloudConfig, AuditAction, AuditLog, Note, CategoryItem, Customer, CustomerGroup, Vehicle, BankBalanceTransaction, Account, AccountType, DiscountItem, CheckoutOrder, CheckoutOrderLine, CheckoutOrderStatus, MembershipTier, CustomerMembership, VehicleType, VehicleSize, PaymentCurrency, PaymentMethod, PaymentStatus } from '../types';
+import { Transaction, TransactionType, CloudConfig, AuditAction, AuditLog, Note, CategoryItem, Customer, CustomerGroup, Vehicle, BankBalanceTransaction, Account, AccountType, CurrencyExchangeRate, DiscountItem, CheckoutOrder, CheckoutOrderLine, CheckoutOrderStatus, MembershipTier, CustomerMembership, VehicleType, VehicleSize, PaymentCurrency, PaymentMethod, PaymentStatus, EmployeePageKey, EmployeePagePermission, EmployeeUser, ChargingRateConfig, ChargingSession, ChargingStatus, Appointment, AppointmentStatus } from '../types';
 import { getPrimaryCategoryId, getTransactionAmount, getTransactionDescription, normalizeTransactionItems, parseItemsFromNotes, serializeItemsIntoNotes } from '../utils/transactionItems';
 import { getSplitDisplayLabel, getTransactionSplit } from '../utils/transactionSplit';
 
 let supabase: any = null;
+let supabaseUrl: string | null = null;
 
 export type SyncRemoteTransactionsResult = {
   success: boolean;
@@ -15,6 +16,18 @@ export type SyncRemoteTransactionsResult = {
   failedChunkIndex?: number;
   attemptedCount?: number;
   completedChunks?: number;
+};
+
+export type VehicleModelCatalogEntry = {
+  id: string;
+  makeEn: string;
+  makeZh?: string;
+  modelEn: string;
+  modelZh?: string;
+  vehicleTypeEn: string;
+  vehicleTypeZh?: string;
+  marketScope?: string;
+  isActive: boolean;
 };
 
 type SyncedTransactionRow = {
@@ -48,6 +61,7 @@ const VALID_CHECKOUT_ORDER_STATUSES = new Set(Object.values(CheckoutOrderStatus)
 const VALID_PAYMENT_STATUSES = new Set<PaymentStatus>(['pending', 'paid']);
 const VALID_PAYMENT_METHODS = new Set<PaymentMethod>(Object.values(PaymentMethod));
 const VALID_PAYMENT_CURRENCIES = new Set<PaymentCurrency>(Object.values(PaymentCurrency));
+const VALID_CHARGING_STATUSES = new Set<ChargingStatus>(['IDLE', 'CHARGING', 'COMPLETED']);
 const FIXED_MEMBERSHIP_TIER_NAME_BY_ID: Record<string, string> = {
   tier_guest: 'Guest',
   tier_plus: 'Plus',
@@ -57,16 +71,36 @@ const FIXED_MEMBERSHIP_TIER_NAME_BY_ID: Record<string, string> = {
 };
 const REGULAR_VEHICLE_TYPES = new Set<string>([
   VehicleType.SEDAN,
+  VehicleType.HATCHBACK,
+  VehicleType.WAGON,
   VehicleType.COUPE,
   VehicleType.SPORTS,
 ]);
 const LARGE_VEHICLE_TYPES = new Set<string>([
+  VehicleType.CROSSOVER,
   VehicleType.SUV,
+  VehicleType.OFFROAD,
   VehicleType.PICKUP,
   VehicleType.MPV,
   VehicleType.VAN,
   VehicleType.LIMOUSINE,
 ]);
+
+export const DEFAULT_EMPLOYEE_PAGE_KEYS: EmployeePageKey[] = ['transactions', 'input', 'settings', 'vehicles', 'customers', 'completed_checkout', 'service_lifecycle', 'charging', 'appointments'];
+
+const normalizeChargingStatus = (value: unknown): ChargingStatus => {
+  if (typeof value !== 'string') return 'IDLE';
+  const normalized = value.trim().toUpperCase();
+  return VALID_CHARGING_STATUSES.has(normalized as ChargingStatus)
+    ? (normalized as ChargingStatus)
+    : 'IDLE';
+};
+
+const normalizeMeterValue = (value: unknown, fallback = 0): number => {
+  const parsed = normalizeNumber(value, fallback);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.round(parsed * 10) / 10;
+};
 
 const normalizeCheckoutOrderStatus = (value: unknown): CheckoutOrderStatus => {
   if (typeof value !== 'string') return CheckoutOrderStatus.DRAFT;
@@ -107,9 +141,12 @@ const isPaymentMethodCurrencyCompatible = (
   currency: PaymentCurrency | null
 ): boolean => {
   if (!method || !currency) return true;
+  if (method === PaymentMethod.FPS) return currency === PaymentCurrency.HKD;
+  if (method === PaymentMethod.PAYME) return currency === PaymentCurrency.HKD;
   if (method === PaymentMethod.HKD_CASH) return currency === PaymentCurrency.HKD;
   if (method === PaymentMethod.RMB_CASH) return currency === PaymentCurrency.RMB;
   if (method === PaymentMethod.MOP_CASH) return currency === PaymentCurrency.MOP;
+  if (method === PaymentMethod.MPAY) return currency === PaymentCurrency.MOP;
   return true;
 };
 
@@ -145,6 +182,18 @@ const normalizeNullableText = (value?: string | null): string | null => {
 const normalizeRequiredText = (value?: string): string => {
   if (typeof value !== 'string') return '';
   return value.trim();
+};
+
+const normalizeUsername = (value?: string): string => normalizeRequiredText(value).toLowerCase();
+
+const hashPassword = async (password: string): Promise<string> => {
+  const source = normalizeRequiredText(password);
+  if (!source) return '';
+
+  const encoded = new TextEncoder().encode(source);
+  const digest = await crypto.subtle.digest('SHA-256', encoded);
+  const bytes = Array.from(new Uint8Array(digest));
+  return bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
 };
 
 const normalizeOccurredAt = (value?: string): string | null => {
@@ -199,6 +248,34 @@ const normalizeVehicleSize = (value: unknown, type?: VehicleType): VehicleSize |
     }
   }
   return deriveVehicleSizeFromType(type);
+};
+
+const isMissingCustomersWhatsappEnabledColumn = (error: any): boolean => {
+  const message = typeof error?.message === 'string' ? error.message.toLowerCase() : '';
+  return (
+    error?.code === '42703' ||
+    (error?.code === 'PGRST204' && message.includes('whatsapp_enabled')) ||
+    (message.includes('whatsapp_enabled') && message.includes('customers'))
+  );
+};
+
+const isMissingCheckoutPreInspectionColumn = (error: any): boolean => {
+  const message = typeof error?.message === 'string' ? error.message.toLowerCase() : '';
+  return (
+    error?.code === '42703' ||
+    (error?.code === 'PGRST204' && (
+      message.includes('attention_details') ||
+      message.includes('customer_additional_comments') ||
+      message.includes('pre_inspection_completed') ||
+      message.includes('pre_inspection_completed_at')
+    )) ||
+    (message.includes('checkout_sales') && (
+      message.includes('attention_details') ||
+      message.includes('customer_additional_comments') ||
+      message.includes('pre_inspection_completed') ||
+      message.includes('pre_inspection_completed_at')
+    ))
+  );
 };
 
 const buildReceiptNumber = (transaction: Transaction): string => {
@@ -290,6 +367,8 @@ const normalizeTransactionForSync = (transaction: Transaction): { row?: SyncedTr
       payment_status: normalizePaymentStatus(transaction.paymentStatus, 'paid'),
       payment_method: paymentMethod,
       payment_currency: paymentCurrency,
+      currency: transaction.currency || PaymentCurrency.RMB,
+      payment_amount: transaction.paymentAmount == null ? null : Math.max(0, normalizeNumber(transaction.paymentAmount, 0)),
     },
     errors
   };
@@ -304,6 +383,7 @@ export const initSupabase = (config: CloudConfig) => {
   try {
     const url = config.url.trim().replace(/\/$/, "");
     const key = config.key.trim();
+    supabaseUrl = url;
     supabase = createClient(url, key);
     console.log("Supabase client created successfully.");
     return supabase;
@@ -401,14 +481,18 @@ export const testConnection = async (config: CloudConfig): Promise<{ success: bo
     const { error: notesError } = await tempClient.from('notes').select('id').limit(1);
     const { error: accountsError } = await tempClient.from('accounts').select('id, name, type').limit(1);
     const { error: customersError } = await tempClient.from('customers').select('id').limit(1);
+    const { error: employeeUsersError } = await tempClient.from('employee_users').select('id, username').limit(1);
+    const { error: employeePermissionsError } = await tempClient.from('employee_page_permissions').select('id, username, page_key').limit(1);
     
-    if (readError || transactionItemsError || notesError || accountsError || customersError) {
+    if (readError || transactionItemsError || notesError || accountsError || customersError || employeeUsersError || employeePermissionsError) {
       const missingTable = 
         (readError && readError.code === '42P01') ? 'transactions' :
         (transactionItemsError && transactionItemsError.code === '42P01') ? 'transaction_items' :
         (notesError && notesError.code === '42P01') ? 'notes' :
         (accountsError && accountsError.code === '42P01') ? 'accounts' :
-        (customersError && customersError.code === '42P01') ? 'customers' : null;
+        (customersError && customersError.code === '42P01') ? 'customers' :
+        (employeeUsersError && (employeeUsersError.code === '42P01' || employeeUsersError.code === 'PGRST204')) ? 'employee_users' :
+        (employeePermissionsError && (employeePermissionsError.code === '42P01' || employeePermissionsError.code === 'PGRST204')) ? 'employee_page_permissions' : null;
 
       if (missingTable) {
         return { 
@@ -435,7 +519,11 @@ export const testConnection = async (config: CloudConfig): Promise<{ success: bo
         return { success: false, message: 'Column MISSING in "accounts"', details: 'The "accounts" table is missing required columns (name, type). Please update your Supabase schema.' };
       }
 
-      return { success: false, message: `System Error: ${readError?.code || transactionItemsError?.code || notesError?.code || accountsError?.code || customersError?.code}`, details: readError?.message || transactionItemsError?.message || notesError?.message || accountsError?.message || customersError?.message };
+      return {
+        success: false,
+        message: `System Error: ${readError?.code || transactionItemsError?.code || notesError?.code || accountsError?.code || customersError?.code || employeeUsersError?.code || employeePermissionsError?.code}`,
+        details: readError?.message || transactionItemsError?.message || notesError?.message || accountsError?.message || customersError?.message || employeeUsersError?.message || employeePermissionsError?.message
+      };
     }
 
     // 2. Check Write Access (Permissions Check)
@@ -587,6 +675,8 @@ export const fetchTransactions = async (): Promise<{ data: Transaction[] | null;
         paymentStatus: normalizePaymentStatus(t.payment_status, 'paid'),
         paymentMethod: normalizePaymentMethod(t.payment_method) || undefined,
         paymentCurrency: normalizePaymentCurrency(t.payment_currency) || undefined,
+        currency: normalizePaymentCurrency(t.currency) || PaymentCurrency.RMB,
+        paymentAmount: t.payment_amount == null ? undefined : Math.max(0, normalizeNumber(t.payment_amount, 0)),
       };
       return {
         ...transaction,
@@ -889,7 +979,9 @@ export const fetchRemoteCategories = async (): Promise<{ data: CategoryItem[] | 
       price: typeof c.price === 'number' ? c.price : Number(c.price || 0),
       imageUrl: c.image_url,
       estimatedDurationMinutes: Math.max(0, Math.round(normalizeNumber(c.estimated_duration_minutes, 30))),
-      isActiveService: c.is_active_service !== false
+      isActiveService: c.is_active_service !== false,
+      itemCategory: c.item_category ?? undefined,
+      notSoldSeparately: c.not_sold_separately === true,
     }));
 
     return { data: mappedData, error: undefined };
@@ -915,7 +1007,9 @@ export const syncRemoteCategories = async (categories: CategoryItem[]): Promise<
       estimated_duration_minutes: Number.isFinite(c.estimatedDurationMinutes as number)
         ? Math.max(0, Math.round(Number(c.estimatedDurationMinutes)))
         : 30,
-      is_active_service: c.isActiveService !== false
+      is_active_service: c.isActiveService !== false,
+      item_category: c.itemCategory ?? null,
+      not_sold_separately: c.notSoldSeparately === true,
     }));
 
     const { error } = await supabase
@@ -1174,6 +1268,15 @@ export const fetchRemoteCheckoutOrders = async (): Promise<{ data: CheckoutOrder
       checkInAt: row.check_in_at || undefined,
       committedAt: row.committed_at || undefined,
       checkedOutAt: row.checked_out_at || undefined,
+      preWorkRequirement: row.pre_work_requirement || undefined,
+      inProgressNote: row.in_progress_note || undefined,
+      postWorkNote: row.post_work_note || undefined,
+      inProgressAt: row.in_progress_at || undefined,
+      taskCompletedAt: row.task_completed_at || undefined,
+      preInspectionCompleted: row.pre_inspection_completed === true,
+      preInspectionCompletedAt: row.pre_inspection_completed_at || undefined,
+      attentionDetails: Array.isArray(row.attention_details) ? row.attention_details : [],
+      customerAdditionalComments: Array.isArray(row.customer_additional_comments) ? row.customer_additional_comments : [],
       grossAmount: normalizeNumber(row.gross_amount, normalizeNumber(row.subtotal, 0)),
       largeVehicleSurchargeApplied: row.large_vehicle_surcharge_applied === true,
       largeVehicleSurchargeRate: normalizeNumber(row.large_vehicle_surcharge_rate, 0),
@@ -1189,9 +1292,12 @@ export const fetchRemoteCheckoutOrders = async (): Promise<{ data: CheckoutOrder
       paymentStatus: normalizePaymentStatus(row.payment_status, 'pending'),
       paymentMethod: normalizePaymentMethod(row.payment_method) || undefined,
       paymentCurrency: normalizePaymentCurrency(row.payment_currency) || undefined,
-      paidAmount: Math.max(0, normalizeNumber(row.paid_amount, 0)),
+      currency: normalizePaymentCurrency(row.currency) || PaymentCurrency.RMB,
+      paymentAmount: row.payment_amount == null ? undefined : Math.max(0, normalizeNumber(row.payment_amount, 0)),
+      appliedRate: row.applied_rate == null ? undefined : normalizeNumber(row.applied_rate, 0),
       paidAt: row.paid_at || undefined,
       linkedTransactionId: row.linked_transaction_id || undefined,
+      invoiceNumber: row.invoice_number || undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,
       lines: linesBySale.get(row.id) || [],
@@ -1203,25 +1309,62 @@ export const fetchRemoteCheckoutOrders = async (): Promise<{ data: CheckoutOrder
   }
 };
 
+
 export const syncRemoteCheckoutOrders = async (orders: CheckoutOrder[]): Promise<{ success: boolean; error?: string }> => {
   if (!supabase) return { success: false, error: 'Supabase not initialized' };
   if (orders.length === 0) return { success: true };
 
   try {
     const now = new Date().toISOString();
-
-    for (const order of orders) {
-      const method = normalizePaymentMethod(order.paymentMethod);
-      const currency = normalizePaymentCurrency(order.paymentCurrency) || PaymentCurrency.RMB;
-      if (!isPaymentMethodCurrencyCompatible(method, currency)) {
-        return {
-          success: false,
-          error: `Invalid payment method/currency combination for order ${order.id}`,
-        };
+    // Helper to generate invoice number atomically for checked-out orders
+    async function assignInvoiceNumberIfNeeded(order: CheckoutOrder): Promise<string | undefined> {
+      if (order.status !== 'checked_out') return order.invoiceNumber;
+      if (order.invoiceNumber) return order.invoiceNumber;
+      // Get year YY
+      const checkedOutAt = order.checkedOutAt || now;
+      const year = new Date(checkedOutAt).getFullYear();
+      const yy = String(year).slice(-2);
+      // Retry logic for concurrent requests (handle race condition)
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const { data: runRow, error: runError } = await supabase
+          .from('invoice_run_numbers')
+          .select('last_run_number')
+          .eq('year', year)
+          .single();
+        if (runRow && !runError) {
+          const runNumber = runRow.last_run_number + 1;
+          const { error: updateError } = await supabase
+            .from('invoice_run_numbers')
+            .update({ last_run_number: runNumber, updated_at: now })
+            .eq('year', year);
+          if (!updateError) {
+            return `${yy}${String(runNumber).padStart(4, '0')}`;
+          }
+        } else {
+          const { error: insertError } = await supabase
+            .from('invoice_run_numbers')
+            .insert([{ year, last_run_number: 1, updated_at: now }]);
+          if (!insertError) {
+            return `${yy}0001`;
+          }
+        }
+        // Exponential backoff on retry
+        await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 50));
       }
+      throw new Error('Failed to assign invoice number after retries');
     }
 
-    const cleanSales = orders.map(order => ({
+    // Assign invoice numbers serially to avoid race condition on duplicate numbers
+    const ordersWithInvoice: CheckoutOrder[] = [];
+    for (const order of orders) {
+      let invoiceNumber = order.invoiceNumber;
+      if (order.status === 'checked_out' && !invoiceNumber) {
+        invoiceNumber = await assignInvoiceNumberIfNeeded(order);
+      }
+      ordersWithInvoice.push({ ...order, invoiceNumber });
+    }
+
+    const cleanSales = ordersWithInvoice.map(order => ({
       id: order.id,
       customer_id: order.customerId || null,
       vehicle_id: order.vehicleId || null,
@@ -1230,6 +1373,15 @@ export const syncRemoteCheckoutOrders = async (orders: CheckoutOrder[]): Promise
       check_in_at: order.checkInAt || order.occurredAt || now,
       committed_at: order.committedAt || null,
       checked_out_at: order.checkedOutAt || null,
+      pre_work_requirement: normalizeNullableText(order.preWorkRequirement),
+      in_progress_note: normalizeNullableText(order.inProgressNote),
+      post_work_note: normalizeNullableText(order.postWorkNote),
+      in_progress_at: order.inProgressAt || null,
+      task_completed_at: order.taskCompletedAt || null,
+      pre_inspection_completed: order.preInspectionCompleted === true,
+      pre_inspection_completed_at: order.preInspectionCompletedAt || null,
+      attention_details: Array.isArray(order.attentionDetails) ? order.attentionDetails : [],
+      customer_additional_comments: Array.isArray(order.customerAdditionalComments) ? order.customerAdditionalComments : [],
       gross_amount: Math.max(0, normalizeNumber(order.grossAmount)),
       large_vehicle_surcharge_applied: order.largeVehicleSurchargeApplied === true,
       large_vehicle_surcharge_rate: Math.max(0, normalizeNumber(order.largeVehicleSurchargeRate, 0)),
@@ -1242,7 +1394,9 @@ export const syncRemoteCheckoutOrders = async (orders: CheckoutOrder[]): Promise
       payment_status: normalizePaymentStatus(order.paymentStatus, 'pending'),
       payment_method: normalizePaymentMethod(order.paymentMethod),
       payment_currency: normalizePaymentCurrency(order.paymentCurrency) || PaymentCurrency.RMB,
-      paid_amount: Math.max(0, normalizeNumber(order.paidAmount, 0)),
+      currency: normalizePaymentCurrency(order.currency) || PaymentCurrency.RMB,
+      payment_amount: order.paymentAmount == null ? null : Math.max(0, normalizeNumber(order.paymentAmount, 0)),
+      applied_rate: order.appliedRate == null ? null : normalizeNumber(order.appliedRate, 0),
       paid_at: order.paidAt || null,
       linked_transaction_id: normalizeNullableText(order.linkedTransactionId),
       estimated_duration_minutes: Math.max(0, Math.round(normalizeNumber(order.estimatedDurationMinutes))),
@@ -1251,6 +1405,7 @@ export const syncRemoteCheckoutOrders = async (orders: CheckoutOrder[]): Promise
       occurred_at: order.occurredAt || order.checkInAt || now,
       created_at: order.createdAt || now,
       updated_at: order.updatedAt || now,
+      invoice_number: order.invoiceNumber || null,
     }));
 
     const { error: salesError } = await supabase
@@ -1258,7 +1413,29 @@ export const syncRemoteCheckoutOrders = async (orders: CheckoutOrder[]): Promise
       .upsert(cleanSales, { onConflict: 'id' });
 
     if (salesError) {
-      return { success: false, error: salesError.message };
+      if (!isMissingCheckoutPreInspectionColumn(salesError)) {
+        return { success: false, error: salesError.message };
+      }
+
+      // Retry without new pre-inspection columns if migration/cache is behind.
+      const legacyCleanSales = cleanSales.map((row: any) => {
+        const {
+          pre_inspection_completed,
+          pre_inspection_completed_at,
+          attention_details,
+          customer_additional_comments,
+          ...legacyRow
+        } = row;
+        return legacyRow;
+      });
+
+      const { error: legacySalesError } = await supabase
+        .from('checkout_sales')
+        .upsert(legacyCleanSales, { onConflict: 'id' });
+
+      if (legacySalesError) {
+        return { success: false, error: legacySalesError.message };
+      }
     }
 
     const saleIds = cleanSales.map(row => row.id);
@@ -1320,7 +1497,12 @@ export const updateRemoteCheckoutOrderStatus = async (
   options?: {
     committedAt?: string;
     checkedOutAt?: string;
+    inProgressAt?: string;
+    taskCompletedAt?: string;
     notes?: string;
+    preWorkRequirement?: string;
+    inProgressNote?: string;
+    postWorkNote?: string;
   }
 ): Promise<{ success: boolean; error?: string }> => {
   if (!supabase) return { success: false, error: 'Supabase not initialized' };
@@ -1336,12 +1518,32 @@ export const updateRemoteCheckoutOrderStatus = async (
       patch.committed_at = options?.committedAt || now;
     }
 
+    if (nextStatus === CheckoutOrderStatus.IN_PROGRESS) {
+      patch.in_progress_at = options?.inProgressAt || now;
+    }
+
+    if (nextStatus === CheckoutOrderStatus.TASK_COMPLETED) {
+      patch.task_completed_at = options?.taskCompletedAt || now;
+    }
+
     if (nextStatus === CheckoutOrderStatus.CHECKED_OUT) {
       patch.checked_out_at = options?.checkedOutAt || now;
     }
 
     if (typeof options?.notes === 'string') {
       patch.notes = normalizeNullableText(options.notes);
+    }
+
+    if (typeof options?.preWorkRequirement === 'string') {
+      patch.pre_work_requirement = normalizeNullableText(options.preWorkRequirement);
+    }
+
+    if (typeof options?.inProgressNote === 'string') {
+      patch.in_progress_note = normalizeNullableText(options.inProgressNote);
+    }
+
+    if (typeof options?.postWorkNote === 'string') {
+      patch.post_work_note = normalizeNullableText(options.postWorkNote);
     }
 
     const { error } = await supabase
@@ -1356,6 +1558,62 @@ export const updateRemoteCheckoutOrderStatus = async (
     return { success: true };
   } catch (e: any) {
     return { success: false, error: e?.message || 'Unknown status update error' };
+  }
+};
+
+export const fetchRemoteExchangeRates = async (): Promise<{ data: CurrencyExchangeRate[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await withRetry(() => supabase!
+      .from('currency_exchange_rates')
+      .select('*')
+      .order('effective_date', { ascending: false })
+      .order('created_at', { ascending: false })) as any;
+
+    if (error) {
+      return { data: null, error: `[${error.code}] ${error.message}` };
+    }
+
+    const mapped: CurrencyExchangeRate[] = (data || []).map((row: any) => ({
+      id: row.id,
+      fromCurrency: normalizePaymentCurrency(row.from_currency) || PaymentCurrency.RMB,
+      toCurrency: normalizePaymentCurrency(row.to_currency) || PaymentCurrency.RMB,
+      rate: normalizeNumber(row.rate, 0),
+      effectiveDate: row.effective_date,
+      createdAt: row.created_at,
+    }));
+
+    return { data: mapped, error: undefined };
+  } catch (e: any) {
+    return { data: null, error: e?.message || 'Unknown network error' };
+  }
+};
+
+export const syncRemoteExchangeRates = async (rates: CurrencyExchangeRate[]): Promise<{ success: boolean; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+  if (rates.length === 0) return { success: true };
+
+  try {
+    const cleanRates = rates.map(rate => ({
+      id: rate.id,
+      from_currency: normalizePaymentCurrency(rate.fromCurrency) || PaymentCurrency.RMB,
+      to_currency: normalizePaymentCurrency(rate.toCurrency) || PaymentCurrency.RMB,
+      rate: normalizeNumber(rate.rate, 0),
+      effective_date: rate.effectiveDate,
+      created_at: rate.createdAt || new Date().toISOString(),
+    }));
+
+    const { error } = await supabase
+      .from('currency_exchange_rates')
+      .upsert(cleanRates, { onConflict: 'id' });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Unknown sync error' };
   }
 };
 
@@ -1436,12 +1694,14 @@ export const findCustomerVehicleByLicensePlate = async (
       id: customerRow.id,
       name: customerRow.name,
       chineseName: customerRow.chinese_name,
+      whatsappEnabled: Boolean(customerRow.whatsapp_enabled),
       group: customerRow.group_name,
       phone: customerRow.phone,
       countryCode: customerRow.country_code,
       vehicleId: customerRow.vehicle_id,
       companyCode: customerRow.company_code,
       birthday: customerRow.birthday,
+      creditDays: Math.max(0, Math.round(normalizeNumber(customerRow.credit_days, 0))),
       notes: customerRow.notes,
       createdAt: customerRow.created_at,
       updatedAt: customerRow.updated_at,
@@ -1470,12 +1730,14 @@ export const fetchRemoteCustomers = async (): Promise<{ data: Customer[] | null;
       id: c.id,
       name: c.name,
       chineseName: c.chinese_name,
+      whatsappEnabled: Boolean(c.whatsapp_enabled),
       group: c.group_name,
       phone: c.phone,
       countryCode: c.country_code,
       vehicleId: c.vehicle_id,
       companyCode: c.company_code,
       birthday: c.birthday,
+      creditDays: Math.max(0, Math.round(normalizeNumber(c.credit_days, 0))),
       notes: c.notes,
       createdAt: c.created_at,
       updatedAt: c.updated_at
@@ -1496,12 +1758,14 @@ export const syncRemoteCustomers = async (customers: Customer[]): Promise<{ succ
       id: c.id,
       name: c.name,
       chinese_name: c.chineseName || null,
+      whatsapp_enabled: Boolean(c.whatsappEnabled),
       group_name: c.group || null,
       phone: c.phone || null,
       country_code: c.countryCode || null,
       vehicle_id: c.vehicleId || null,
       company_code: c.companyCode || null,
       birthday: c.birthday || null,
+      credit_days: Math.max(0, Math.round(normalizeNumber(c.creditDays, 0))),
       notes: c.notes || null,
       created_at: c.createdAt || new Date().toISOString(),
       updated_at: c.updatedAt || new Date().toISOString()
@@ -1510,6 +1774,20 @@ export const syncRemoteCustomers = async (customers: Customer[]): Promise<{ succ
     const { error } = await supabase
       .from('customers')
       .upsert(cleanCustomers, { onConflict: 'id' });
+
+    if (error && isMissingCustomersWhatsappEnabledColumn(error)) {
+      const legacyCustomers = cleanCustomers.map(({ whatsapp_enabled, ...rest }) => rest);
+      const { error: legacyError } = await supabase
+        .from('customers')
+        .upsert(legacyCustomers, { onConflict: 'id' });
+
+      if (legacyError) {
+        console.error('Customers Legacy Sync Error:', legacyError);
+        return { success: false, error: legacyError.message };
+      }
+
+      return { success: true };
+    }
     
     if (error) {
       console.error('Customers Sync Error:', error);
@@ -1659,6 +1937,51 @@ export const fetchRemoteVehicles = async (): Promise<{ data: Vehicle[] | null; e
   }
 };
 
+export const fetchRemoteVehicleModelCatalog = async (): Promise<{ data: VehicleModelCatalogEntry[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+  try {
+    const primaryQuery = () => supabase!
+      .from('vehicle_model_catalog')
+      .select('id,make_en,make_zh,model_en,model_zh,vehicle_type_en,vehicle_type_zh,market_scope,is_active')
+      .order('make_en', { ascending: true })
+      .order('model_en', { ascending: true });
+
+    const fallbackQuery = () => supabase!
+      .from('vehicle_model_catalog')
+      .select('id,make_en,make_zh,model_en,model_zh,is_active');
+
+    let data: any[] | null = null;
+    let error: any = null;
+
+    ({ data, error } = await withRetry(primaryQuery) as any);
+    if (error) {
+      // Retry with a minimal projection/order in case environment-specific constraints block the primary query.
+      ({ data, error } = await withRetry(fallbackQuery) as any);
+    }
+
+    if (error) {
+      return { data: null, error: error.message };
+    }
+
+    const mappedData: VehicleModelCatalogEntry[] = (data || []).map((row: any) => ({
+      id: String(row.id || `${String(row.make_en || '').trim()}::${String(row.model_en || '').trim()}`),
+      makeEn: String(row.make_en || '').trim(),
+      makeZh: typeof row.make_zh === 'string' ? row.make_zh.trim() || undefined : undefined,
+      modelEn: String(row.model_en || '').trim(),
+      modelZh: typeof row.model_zh === 'string' ? row.model_zh.trim() || undefined : undefined,
+      vehicleTypeEn: String(row.vehicle_type_en || '').trim(),
+      vehicleTypeZh: typeof row.vehicle_type_zh === 'string' ? row.vehicle_type_zh.trim() || undefined : undefined,
+      marketScope: typeof row.market_scope === 'string' ? row.market_scope.trim() || undefined : undefined,
+      // Treat null/undefined is_active as active for backward compatibility.
+      isActive: row?.is_active !== false,
+    })).filter(entry => entry.makeEn && entry.modelEn && entry.isActive);
+
+    return { data: mappedData };
+  } catch (e: any) {
+    return { data: null, error: e?.message || 'Unknown fetchRemoteVehicleModelCatalog error' };
+  }
+};
+
 export const syncRemoteVehicles = async (vehicles: Vehicle[]): Promise<{ success: boolean; error?: string }> => {
   if (!supabase) return { success: false, error: 'Supabase not initialized' };
   if (vehicles.length === 0) return { success: true };
@@ -1719,6 +2042,225 @@ export const subscribeToVehicles = (onUpdate: () => void) => {
   return supabase
     .channel('vehicles_channel')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'vehicles' }, () => onUpdate())
+    .subscribe();
+};
+
+export const fetchRemoteChargingRates = async (): Promise<{ data: ChargingRateConfig[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await withRetry(() => supabase!
+      .from('charging_rate_configs')
+      .select('*')
+      .order('created_at', { ascending: true })) as any;
+
+    if (error) {
+      return { data: null, error: `[${error.code}] ${error.message}` };
+    }
+
+    const mapped: ChargingRateConfig[] = (data || []).map((row: any) => ({
+      id: row.id,
+      name: row.name,
+      costPerKwh: Math.max(0, normalizeNumber(row.cost_per_kwh, 0)),
+      isActive: row.is_active === true,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at || undefined,
+    }));
+
+    return { data: mapped };
+  } catch (e: any) {
+    return { data: null, error: e?.message || 'Unknown network error' };
+  }
+};
+
+export const syncRemoteChargingRates = async (rates: ChargingRateConfig[]): Promise<{ success: boolean; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+  if (rates.length === 0) return { success: true };
+
+  try {
+    const cleanRows = rates.map((rate) => ({
+      id: rate.id,
+      name: normalizeRequiredText(rate.name) || 'EV Charging',
+      cost_per_kwh: Math.max(0, normalizeNumber(rate.costPerKwh, 0)),
+      is_active: rate.isActive === true,
+      created_at: rate.createdAt || new Date().toISOString(),
+      updated_at: rate.updatedAt || new Date().toISOString(),
+    }));
+
+    const { error } = await supabase
+      .from('charging_rate_configs')
+      .upsert(cleanRows, { onConflict: 'id' });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Unknown sync error' };
+  }
+};
+
+export const fetchRemoteChargingSessions = async (): Promise<{ data: ChargingSession[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await withRetry(() => supabase!
+      .from('charging_sessions')
+      .select('*')
+      .order('started_at', { ascending: false })) as any;
+
+    if (error) {
+      return { data: null, error: `[${error.code}] ${error.message}` };
+    }
+
+    const mapped: ChargingSession[] = (data || []).map((row: any) => ({
+      id: row.id,
+      status: normalizeChargingStatus(row.status),
+      customerId: row.customer_id,
+      vehicleId: row.vehicle_id,
+      meterAtStart: normalizeMeterValue(row.meter_at_start, 0),
+      meterAtEnd: row.meter_at_end == null ? undefined : normalizeMeterValue(row.meter_at_end, 0),
+      currentMeterSnapshot: normalizeMeterValue(row.current_meter_snapshot, 0),
+      consumedKwh: row.consumed_kwh == null ? undefined : normalizeMeterValue(row.consumed_kwh, 0),
+      ratePerKwh: row.rate_per_kwh == null ? undefined : Math.max(0, normalizeNumber(row.rate_per_kwh, 0)),
+      amount: row.amount == null ? undefined : Math.max(0, normalizeNumber(row.amount, 0)),
+      gapKwh: row.gap_kwh == null ? undefined : normalizeMeterValue(row.gap_kwh, 0),
+      gapTransactionId: row.gap_transaction_id || undefined,
+      gapConfirmed: row.gap_confirmed === true,
+      startedAt: row.started_at,
+      completedAt: row.completed_at || undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at || undefined,
+    }));
+
+    return { data: mapped };
+  } catch (e: any) {
+    return { data: null, error: e?.message || 'Unknown network error' };
+  }
+};
+
+export const syncRemoteChargingSessions = async (sessions: ChargingSession[]): Promise<{ success: boolean; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+  if (sessions.length === 0) return { success: true };
+
+  try {
+    const rows = sessions.map((session) => ({
+      id: session.id,
+      status: normalizeChargingStatus(session.status),
+      customer_id: session.customerId,
+      vehicle_id: session.vehicleId,
+      meter_at_start: normalizeMeterValue(session.meterAtStart, 0),
+      meter_at_end: session.meterAtEnd == null ? null : normalizeMeterValue(session.meterAtEnd, 0),
+      current_meter_snapshot: normalizeMeterValue(session.currentMeterSnapshot, 0),
+      consumed_kwh: session.consumedKwh == null ? null : normalizeMeterValue(session.consumedKwh, 0),
+      rate_per_kwh: session.ratePerKwh == null ? null : Math.max(0, normalizeNumber(session.ratePerKwh, 0)),
+      amount: session.amount == null ? null : Math.max(0, normalizeNumber(session.amount, 0)),
+      gap_kwh: session.gapKwh == null ? null : normalizeMeterValue(session.gapKwh, 0),
+      gap_transaction_id: normalizeNullableText(session.gapTransactionId),
+      gap_confirmed: session.gapConfirmed === true,
+      started_at: session.startedAt,
+      completed_at: session.completedAt || null,
+      created_at: session.createdAt || new Date().toISOString(),
+      updated_at: session.updatedAt || new Date().toISOString(),
+    }));
+
+    const { error } = await supabase
+      .from('charging_sessions')
+      .upsert(rows, { onConflict: 'id' });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Unknown sync error' };
+  }
+};
+
+export const subscribeToChargingRates = (onUpdate: () => void) => {
+  if (!supabase) return null;
+  return supabase
+    .channel('charging_rates_channel')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'charging_rate_configs' }, () => onUpdate())
+    .subscribe();
+};
+
+export const subscribeToChargingSessions = (onUpdate: () => void) => {
+  if (!supabase) return null;
+  return supabase
+    .channel('charging_sessions_channel')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'charging_sessions' }, () => onUpdate())
+    .subscribe();
+};
+
+const VALID_APPOINTMENT_STATUSES = new Set<AppointmentStatus>(['PENDING', 'CONFIRMED', 'CANCELLED']);
+
+const normalizeAppointmentStatus = (value: unknown): AppointmentStatus => {
+  if (typeof value !== 'string') return 'PENDING';
+  const normalized = value.trim().toUpperCase();
+  return VALID_APPOINTMENT_STATUSES.has(normalized as AppointmentStatus)
+    ? (normalized as AppointmentStatus)
+    : 'PENDING';
+};
+
+export const fetchRemoteAppointments = async (): Promise<{ data: Appointment[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await withRetry(() => supabase!
+      .from('appointments')
+      .select('*')
+      .order('scheduled_at', { ascending: false })) as any;
+    if (error) return { data: null, error: `[${error.code}] ${error.message}` };
+    const mapped: Appointment[] = (data || []).map((row: any) => ({
+      id: row.id,
+      status: normalizeAppointmentStatus(row.status),
+      customerId: row.customer_id,
+      vehicleId: row.vehicle_id,
+      scheduledAt: row.scheduled_at,
+      serviceCategoryIds: Array.isArray(row.service_category_ids) ? row.service_category_ids : [],
+      notes: row.notes ?? undefined,
+      cancelledReason: row.cancelled_reason ?? undefined,
+      linkedCheckoutOrderId: row.linked_checkout_order_id ?? undefined,
+      convertedAt: row.converted_at ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at ?? undefined,
+    }));
+    return { data: mapped };
+  } catch (e: any) {
+    return { data: null, error: e.message };
+  }
+};
+
+export const syncRemoteAppointments = async (appointments: Appointment[]): Promise<{ success: boolean; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+  try {
+    const rows = appointments.map(a => ({
+      id: a.id,
+      status: a.status,
+      customer_id: a.customerId,
+      vehicle_id: a.vehicleId,
+      scheduled_at: a.scheduledAt,
+      service_category_ids: a.serviceCategoryIds,
+      notes: a.notes ?? null,
+      cancelled_reason: a.cancelledReason ?? null,
+      linked_checkout_order_id: a.linkedCheckoutOrderId ?? null,
+      converted_at: a.convertedAt ?? null,
+      created_at: a.createdAt,
+      updated_at: new Date().toISOString(),
+    }));
+    const { error } = await supabase.from('appointments').upsert(rows, { onConflict: 'id' });
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+};
+
+export const subscribeToAppointments = (onUpdate: () => void) => {
+  if (!supabase) return null;
+  return supabase
+    .channel('appointments_channel')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments' }, () => onUpdate())
     .subscribe();
 };
 
@@ -1784,6 +2326,271 @@ export const clearAllAdminSessions = async (): Promise<void> => {
       .neq('id', '_RESET_');
   } catch (e) {
     console.error('Clear all sessions error:', e);
+  }
+};
+
+const isEmployeeTableMissing = (error: any): boolean =>
+  error?.code === 'PGRST204' ||
+  error?.code === '42P01' ||
+  (typeof error?.message === 'string' && error.message.toLowerCase().includes('schema cache'));
+
+const EMPLOYEE_TABLE_MISSING_MSG =
+  `Employee tables are not set up in the database yet. Please run the employee setup SQL script in Supabase SQL Editor (Settings page -> copy SQL script). Current project: ${supabaseUrl || 'unknown'}`;
+
+export const fetchEmployeeUsers = async (): Promise<{ data: EmployeeUser[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+
+  try {
+    const { data, error } = await withRetry(() => supabase!
+      .from('employee_users')
+      .select('id, username, is_active, hide_financial_data, created_at, updated_at')
+      .order('username', { ascending: true })) as any;
+
+    if (error) {
+      if (isEmployeeTableMissing(error)) return { data: null, error: EMPLOYEE_TABLE_MISSING_MSG };
+      return { data: null, error: error.message };
+    }
+
+    const mapped: EmployeeUser[] = (data || []).map((row: any) => ({
+      id: row.id,
+      username: row.username,
+      isActive: row.is_active !== false,
+      hideFinancialData: row.hide_financial_data !== false,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+
+    return { data: mapped };
+  } catch (e: any) {
+    return { data: null, error: e.message || 'Unknown network error' };
+  }
+};
+
+export const fetchEmployeePagePermissions = async (): Promise<{ data: EmployeePagePermission[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+
+  try {
+    const { data, error } = await withRetry(() => supabase!
+      .from('employee_page_permissions')
+      .select('id, username, page_key, can_view, created_at, updated_at')
+      .order('username', { ascending: true })) as any;
+
+    if (error) {
+      if (isEmployeeTableMissing(error)) return { data: null, error: EMPLOYEE_TABLE_MISSING_MSG };
+      return { data: null, error: error.message };
+    }
+
+    const mapped: EmployeePagePermission[] = (data || []).map((row: any) => ({
+      id: row.id,
+      username: row.username,
+      pageKey: row.page_key,
+      canView: row.can_view !== false,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+
+    return { data: mapped };
+  } catch (e: any) {
+    return { data: null, error: e.message || 'Unknown network error' };
+  }
+};
+
+export const saveEmployeeUser = async (params: {
+  username: string;
+  password?: string;
+  isActive?: boolean;
+  hideFinancialData?: boolean;
+}): Promise<{ success: boolean; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+
+  const username = normalizeUsername(params.username);
+  if (!username) return { success: false, error: 'Username is required' };
+
+  try {
+    const { data: existing, error: existingError } = await supabase
+      .from('employee_users')
+      .select('id, username')
+      .ilike('username', username)
+      .limit(1)
+      .maybeSingle();
+
+    if (existingError) {
+      if (isEmployeeTableMissing(existingError)) return { success: false, error: EMPLOYEE_TABLE_MISSING_MSG };
+      return { success: false, error: existingError.message };
+    }
+
+    const updates: any = {
+      username,
+      is_active: params.isActive !== false,
+      hide_financial_data: params.hideFinancialData !== false,
+      updated_at: new Date().toISOString(),
+    };
+
+    const normalizedPassword = normalizeRequiredText(params.password);
+    if (normalizedPassword) {
+      updates.password_hash = await hashPassword(normalizedPassword);
+    }
+
+    if (existing?.id) {
+      const { error } = await supabase
+        .from('employee_users')
+        .update(updates)
+        .eq('id', existing.id);
+      return { success: !error, error: error?.message };
+    }
+
+    if (!normalizedPassword) {
+      return { success: false, error: 'Password is required for new users' };
+    }
+
+    const row = {
+      id: `emp_${crypto.randomUUID()}`,
+      ...updates,
+      created_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from('employee_users')
+      .insert(row);
+
+    if (error) {
+      if (isEmployeeTableMissing(error)) return { success: false, error: EMPLOYEE_TABLE_MISSING_MSG };
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+};
+
+export const saveEmployeePagePermissions = async (
+  usernameRaw: string,
+  pageKeys: EmployeePageKey[]
+): Promise<{ success: boolean; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+
+  const username = normalizeUsername(usernameRaw);
+  if (!username) return { success: false, error: 'Username is required' };
+
+  try {
+    const { data: existingUser, error: userError } = await supabase
+      .from('employee_users')
+      .select('username')
+      .ilike('username', username)
+      .limit(1)
+      .maybeSingle();
+
+    if (userError) {
+      return { success: false, error: userError.message };
+    }
+
+    if (!existingUser?.username) {
+      return { success: false, error: 'Employee user not found' };
+    }
+
+    const canonicalUsername = normalizeUsername(existingUser.username);
+
+    const { error: deleteError } = await supabase
+      .from('employee_page_permissions')
+      .delete()
+      .ilike('username', canonicalUsername);
+
+    if (deleteError) {
+      return { success: false, error: deleteError.message };
+    }
+
+    const uniqueKeys = Array.from(new Set(pageKeys));
+    if (uniqueKeys.length === 0) {
+      return { success: true };
+    }
+
+    const now = new Date().toISOString();
+    const rows = uniqueKeys.map((pageKey) => ({
+      id: `epp_${crypto.randomUUID()}`,
+      username: canonicalUsername,
+      page_key: pageKey,
+      can_view: true,
+      created_at: now,
+      updated_at: now,
+    }));
+
+    const { error } = await supabase
+      .from('employee_page_permissions')
+      .insert(rows);
+
+    return { success: !error, error: error?.message };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+};
+
+export const verifyEmployeeCredentials = async (
+  usernameInput: string,
+  passwordInput: string
+): Promise<{
+  success: boolean;
+  error?: string;
+  user?: EmployeeUser;
+  allowedPageKeys?: EmployeePageKey[];
+}> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+
+  const username = normalizeUsername(usernameInput);
+  const password = normalizeRequiredText(passwordInput);
+  if (!username || !password) {
+    return { success: false, error: 'Username and password are required' };
+  }
+
+  try {
+    const { data: row, error } = await supabase
+      .from('employee_users')
+      .select('id, username, password_hash, is_active, hide_financial_data, created_at, updated_at')
+      .ilike('username', username)
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    if (!row || row.is_active === false) {
+      return { success: false, error: 'Invalid username or password' };
+    }
+
+    const providedHash = await hashPassword(password);
+    if (!providedHash || row.password_hash !== providedHash) {
+      return { success: false, error: 'Invalid username or password' };
+    }
+
+    const { data: permissionRows, error: permissionError } = await supabase
+      .from('employee_page_permissions')
+      .select('page_key, can_view')
+      .ilike('username', row.username);
+
+    if (permissionError) {
+      return { success: false, error: permissionError.message };
+    }
+
+    const allowedPageKeys = (permissionRows || [])
+      .filter((entry: any) => entry.can_view !== false)
+      .map((entry: any) => entry.page_key as EmployeePageKey);
+
+    const user: EmployeeUser = {
+      id: row.id,
+      username: row.username,
+      isActive: row.is_active !== false,
+      hideFinancialData: row.hide_financial_data !== false,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+
+    return {
+      success: true,
+      user,
+      allowedPageKeys: allowedPageKeys.length > 0 ? allowedPageKeys : [...DEFAULT_EMPLOYEE_PAGE_KEYS],
+    };
+  } catch (e: any) {
+    return { success: false, error: e.message };
   }
 };
 

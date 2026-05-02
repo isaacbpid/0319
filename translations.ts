@@ -166,7 +166,8 @@ export const translations = {
     transactionNotes: "交易備註 (Notepad)",
     offlineMessage: "數據庫連接失敗。請刷新頁面以重試。",
     refresh: "刷新",
-    checkout: "Checkout"
+    checkout: "New Sale",
+    completed_checkout: "已完成訂單",
   },
   en: {
     settings: "Settings",
@@ -334,6 +335,7 @@ export const translations = {
     transactionNotes: "Transaction Notes (Notepad)",
     offlineMessage: "Database connection failed. Please refresh to retry.",
     refresh: "Refresh",
-    checkout: "Checkout"
+    checkout: "New Sale",
+    completed_checkout: "Completed Checkout"
   }
 };

@@ -1,6 +1,10 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import CustomerPromptSelect from './CustomerPromptSelect';
 import { CategoryItem, Customer, CustomerGroup, Transaction, TransactionType, Vehicle, VehicleSize, VehicleType } from '../types';
+import LicensePlateField from './LicensePlateField';
 import { translations } from '../translations';
+import { normalizeLicensePlate } from '../utils/licensePlate';
+import { VEHICLE_COLORS, VEHICLE_MAKES_EXTENDED, getVehicleModelsForMake } from '../vehicleData_v2';
 
 interface CustomerPageProps {
   customers: Customer[];
@@ -23,15 +27,22 @@ interface CustomerPageProps {
   onDeleteCustomerGroup: (id: string) => Promise<void>;
   language: 'zh' | 'en';
   isReadOnly?: boolean;
+  hideFinancialData?: boolean;
+  openAddCustomerOnMount?: boolean;
+  addCustomerPrefillLicensePlate?: string;
+  onOpenAddCustomerConsumed?: () => void;
+  onSaveAndAutofillCheckout?: (customerId: string, licensePlate?: string) => void;
 }
 
 type CustomerFormState = {
   name: string;
   chineseName: string;
+  whatsappEnabled: boolean;
   countryCode: string;
   phone: string;
   group: string;
   birthday: string;
+  creditDays: string;
   companyCode: string;
   notes: string;
 };
@@ -47,9 +58,13 @@ type VehicleDraft = {
 
 const VEHICLE_TYPE_OPTIONS: Array<{ value: VehicleType; label: string }> = [
   { value: VehicleType.SEDAN, label: 'Sedan' },
+  { value: VehicleType.HATCHBACK, label: 'Hatchback' },
+  { value: VehicleType.WAGON, label: 'Wagon' },
   { value: VehicleType.COUPE, label: 'Coupe' },
   { value: VehicleType.SPORTS, label: 'Sports' },
+  { value: VehicleType.CROSSOVER, label: 'Crossover' },
   { value: VehicleType.SUV, label: 'SUV' },
+  { value: VehicleType.OFFROAD, label: 'Off-road' },
   { value: VehicleType.PICKUP, label: 'Pick-up' },
   { value: VehicleType.MPV, label: 'MPV' },
   { value: VehicleType.VAN, label: 'VAN' },
@@ -57,7 +72,9 @@ const VEHICLE_TYPE_OPTIONS: Array<{ value: VehicleType; label: string }> = [
 ];
 
 const LARGE_VEHICLE_TYPES = new Set<VehicleType>([
+  VehicleType.CROSSOVER,
   VehicleType.SUV,
+  VehicleType.OFFROAD,
   VehicleType.PICKUP,
   VehicleType.MPV,
   VehicleType.VAN,
@@ -68,11 +85,30 @@ const getVehicleSizeForType = (type: VehicleType): VehicleSize => {
   return LARGE_VEHICLE_TYPES.has(type) ? VehicleSize.LARGE : VehicleSize.REGULAR;
 };
 
+const normalizeMakeKey = (value: string): string => {
+  return value
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[\/|]/g, '');
+};
+
+const canonicalMakeKey = (value: string): string => {
+  const normalized = normalizeMakeKey(value);
+  const englishOnly = normalized.replace(/[\u4e00-\u9fff]/g, '');
+  return englishOnly || normalized;
+};
+
 const COMPANY_CODES = ['DEFAULT', 'VIP', 'FLEET', 'CORPORATE'];
 const COUNTRY_CODES = ['+1', '+852', '+853', '+86', '+65', '+81', '+82', '+886'];
-const PLATE_PROVINCE_KEYS = ['粤', '京', '津', '沪', '渝', '冀', '豫', '云', '辽', '黑', '湘', '皖', '鲁', '新', '苏', '浙', '赣', '鄂', '桂', '甘', '晋', '蒙', '陕', '吉', '闽', '贵', '青', '藏', '川', '宁', '琼', '使', '无'];
-const PLATE_ALPHA_KEYS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
-
+const getDefaultCountryCodeByKeyboardMode = (useSpecialKeyboard: boolean): string => {
+  return useSpecialKeyboard ? '+86' : '+852';
+};
+const buildWhatsAppUrl = (countryCode?: string, phone?: string): string | null => {
+  const areaCode = (countryCode || '').replace(/\D/g, '');
+  const phoneNumber = (phone || '').replace(/\D/g, '');
+  if (!areaCode || !phoneNumber) return null;
+  return `https://wa.me/${areaCode}${phoneNumber}`;
+};
 const emptyVehicleDraft: VehicleDraft = {
   licensePlate: '',
   make: '',
@@ -96,6 +132,11 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
   onDeleteCustomerGroup,
   language,
   isReadOnly,
+  hideFinancialData,
+  openAddCustomerOnMount,
+  addCustomerPrefillLicensePlate,
+  onOpenAddCustomerConsumed,
+  onSaveAndAutofillCheckout,
 }) => {
   const t = translations[language];
   const [search, setSearch] = useState('');
@@ -115,19 +156,24 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
   const [customerForm, setCustomerForm] = useState<CustomerFormState>({
     name: '',
     chineseName: '',
-    countryCode: '+1',
+    whatsappEnabled: false,
+    countryCode: '+852',
     phone: '',
     group: '',
     birthday: '',
+    creditDays: '0',
     companyCode: 'DEFAULT',
     notes: '',
   });
   const [selectedVehicleId, setSelectedVehicleId] = useState('');
+  const [vehicleSearchInput, setVehicleSearchInput] = useState('');
   const [showNewVehiclePopup, setShowNewVehiclePopup] = useState(false);
   const [newVehicleDraft, setNewVehicleDraft] = useState<VehicleDraft>(emptyVehicleDraft);
   const [usePlateKeyboard, setUsePlateKeyboard] = useState(false);
   const [isBirthdayFocused, setIsBirthdayFocused] = useState(false);
   const [editingVehicleId, setEditingVehicleId] = useState<string | null>(null);
+
+  const formatMoney = (value: number) => hideFinancialData ? '***' : `¥${value.toLocaleString()}`;
 
   const vehicleById = useMemo(() => {
     const map = new Map<string, Vehicle>();
@@ -213,40 +259,128 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
   }, [customers, search, customerVisitStats, lastVisitedFilter, notVisitedFilter, visitFrequencyFilter, groupNameFilter, vehicleById]);
 
   const selectedCustomer = customers.find(c => c.id === selectedCustomerId);
+  const selectedCustomerWhatsAppUrl = selectedCustomer
+    ? buildWhatsAppUrl(selectedCustomer.countryCode, selectedCustomer.phone)
+    : null;
   const selectedCustomerTransactions = transactions.filter(tr => tr.customerId === selectedCustomerId);
   const selectedCustomerVehicle = selectedCustomer?.vehicleId ? vehicleById.get(selectedCustomer.vehicleId) : undefined;
   const selectedFormVehicle = selectedVehicleId ? vehicleById.get(selectedVehicleId) : undefined;
+  const vehicleSearchOptions = useMemo(() => {
+    return [...vehicles]
+      .sort((a, b) => (a.licensePlate || '').localeCompare(b.licensePlate || ''));
+  }, [vehicles]);
+  const hasMatchingVehiclePlate = useMemo(() => {
+    const normalizedInput = normalizeLicensePlate(vehicleSearchInput || '');
+    if (!normalizedInput) return false;
+    return vehicles.some(vehicle => normalizeLicensePlate(vehicle.licensePlate || '') === normalizedInput);
+  }, [vehicleSearchInput, vehicles]);
 
-  const beginAdd = () => {
+  const groupOptions = useMemo(() => {
+    const fromSavedGroups = customerGroups.map(group => (group.name || '').trim()).filter(Boolean);
+    const fromCustomers = customers.map(customer => (customer.group || '').trim()).filter(Boolean);
+    return Array.from(new Set([...fromSavedGroups, ...fromCustomers])).sort((a, b) => a.localeCompare(b));
+  }, [customerGroups, customers]);
+
+  const hasMatchingGroup = useMemo(() => {
+    const value = customerForm.group.trim().toLowerCase();
+    if (!value) return false;
+    return groupOptions.some(option => option.toLowerCase() === value);
+  }, [customerForm.group, groupOptions]);
+
+  const hasMatchingCompanyCode = useMemo(() => {
+    const value = customerForm.companyCode.trim().toLowerCase();
+    if (!value) return false;
+    return COMPANY_CODES.some(code => code.toLowerCase() === value);
+  }, [customerForm.companyCode]);
+
+  const autofillMakes = useMemo(() => {
+    return Array.from(new Set([
+      ...VEHICLE_MAKES_EXTENDED,
+      ...vehicles.map(vehicle => (vehicle.make || '').trim()).filter(Boolean),
+    ])).sort((a, b) => a.localeCompare(b));
+  }, [vehicles]);
+
+  const autofillModels = useMemo(() => {
+    const makeKey = canonicalMakeKey(newVehicleDraft.make.trim());
+    if (!makeKey) return [];
+    const staticModels = getVehicleModelsForMake(newVehicleDraft.make);
+    const existingModels = vehicles
+      .filter(vehicle => canonicalMakeKey((vehicle.make || '').trim()) === makeKey)
+      .map(vehicle => (vehicle.model || '').trim())
+      .filter(Boolean);
+    return Array.from(new Set([...staticModels, ...existingModels])).sort((a, b) => a.localeCompare(b));
+  }, [newVehicleDraft.make, vehicles]);
+
+  const autofillColors = useMemo(() => {
+    const existingColors = vehicles.map(vehicle => (vehicle.color || '').trim()).filter(Boolean);
+    return Array.from(new Set([...VEHICLE_COLORS, ...existingColors])).sort((a, b) => a.localeCompare(b));
+  }, [vehicles]);
+
+  const beginAdd = (prefillLicensePlate?: string) => {
+    const normalizedPrefillPlate = normalizeLicensePlate(prefillLicensePlate || '');
     setEditingCustomer(null);
     setCustomerForm({
       name: '',
       chineseName: '',
-      countryCode: '+1',
+      whatsappEnabled: false,
+      countryCode: getDefaultCountryCodeByKeyboardMode(usePlateKeyboard),
       phone: '',
       group: '',
       birthday: '',
+      creditDays: '0',
       companyCode: 'DEFAULT',
       notes: '',
     });
-    setSelectedVehicleId('');
-    setNewVehicleDraft(emptyVehicleDraft);
+    // If a vehicle with the prefill plate already exists, link to it directly
+    // instead of creating a duplicate blank vehicle.
+    const existingVehicle = normalizedPrefillPlate
+      ? vehicles.find(v => normalizeLicensePlate(v.licensePlate || '') === normalizedPrefillPlate)
+      : undefined;
+    if (existingVehicle) {
+      setSelectedVehicleId(existingVehicle.id);
+      setVehicleSearchInput(normalizedPrefillPlate);
+      setNewVehicleDraft(emptyVehicleDraft);
+    } else {
+      setSelectedVehicleId('');
+      setVehicleSearchInput(normalizedPrefillPlate);
+      setNewVehicleDraft(normalizedPrefillPlate ? { ...emptyVehicleDraft, licensePlate: normalizedPrefillPlate } : emptyVehicleDraft);
+    }
     setShowCustomerForm(true);
   };
+
+  useEffect(() => {
+    if (!showCustomerForm || editingCustomer) return;
+    if (customerForm.phone.trim()) return;
+    if (customerForm.countryCode !== '+852' && customerForm.countryCode !== '+86') return;
+
+    setCustomerForm(prev => ({
+      ...prev,
+      countryCode: getDefaultCountryCodeByKeyboardMode(usePlateKeyboard),
+    }));
+  }, [usePlateKeyboard, showCustomerForm, editingCustomer, customerForm.phone, customerForm.countryCode]);
+
+  useEffect(() => {
+    if (!openAddCustomerOnMount || isReadOnly) return;
+    beginAdd(addCustomerPrefillLicensePlate);
+    onOpenAddCustomerConsumed?.();
+  }, [openAddCustomerOnMount, isReadOnly, onOpenAddCustomerConsumed, addCustomerPrefillLicensePlate]);
 
   const beginEdit = (customer: Customer) => {
     setEditingCustomer(customer);
     setCustomerForm({
       name: customer.name || '',
       chineseName: customer.chineseName || '',
-      countryCode: customer.countryCode || '+1',
+      whatsappEnabled: Boolean(customer.whatsappEnabled),
+      countryCode: customer.countryCode || '+852',
       phone: customer.phone || '',
       group: customer.group || '',
       birthday: customer.birthday || '',
+      creditDays: String(Math.max(0, Number(customer.creditDays || 0))),
       companyCode: customer.companyCode || 'DEFAULT',
       notes: customer.notes || '',
     });
     setSelectedVehicleId(customer.vehicleId || '');
+    setVehicleSearchInput(selectedCustomerVehicle?.licensePlate || customer.vehicleId ? (vehicleById.get(customer.vehicleId || '')?.licensePlate || '') : '');
     setNewVehicleDraft(emptyVehicleDraft);
     setShowCustomerForm(true);
   };
@@ -256,36 +390,38 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
     setShowNewVehiclePopup(false);
     setEditingCustomer(null);
     setNewVehicleDraft(emptyVehicleDraft);
-    setUsePlateKeyboard(false);
+    setVehicleSearchInput('');
     setIsBirthdayFocused(false);
     setEditingVehicleId(null);
   };
 
-  const normalizedPlate = newVehicleDraft.licensePlate.replace(/\s+/g, '').toUpperCase().slice(0, 8);
-  const plateChars = Array.from({ length: 8 }, (_, index) => normalizedPlate[index] || '');
-  const nextPlateIndex = Math.min(normalizedPlate.length, 7);
-  const plateKeyboardKeys = normalizedPlate.length === 0 ? PLATE_PROVINCE_KEYS : PLATE_ALPHA_KEYS;
+  const handleVehicleSearchChange = (nextValue: string) => {
+    const normalizedPlate = normalizeLicensePlate(nextValue);
+    setVehicleSearchInput(normalizedPlate);
+    setNewVehicleDraft(emptyVehicleDraft);
+    setEditingVehicleId(null);
 
-  const updatePlateValue = (nextValue: string) => {
-    setNewVehicleDraft(prev => ({
-      ...prev,
-      licensePlate: nextValue.replace(/\s+/g, '').toUpperCase().slice(0, 8),
-    }));
-  };
+    if (!normalizedPlate) {
+      setSelectedVehicleId('');
+      return;
+    }
 
-  const handlePlateKey = (key: string) => {
-    if (normalizedPlate.length >= 8) return;
-    updatePlateValue(`${normalizedPlate}${key}`);
-  };
-
-  const handlePlateBackspace = () => {
-    updatePlateValue(normalizedPlate.slice(0, -1));
+    const matchedVehicle = vehicles.find(vehicle => normalizeLicensePlate(vehicle.licensePlate || '') === normalizedPlate);
+    setSelectedVehicleId(matchedVehicle?.id || '');
   };
 
   const openNewVehiclePopup = () => {
     setEditingVehicleId(null);
     setNewVehicleDraft(emptyVehicleDraft);
-    setUsePlateKeyboard(false);
+    setShowNewVehiclePopup(true);
+  };
+
+  const openNewVehiclePopupWithPlate = (plate: string) => {
+    const normalizedPlate = normalizeLicensePlate(plate || '');
+    setEditingVehicleId(null);
+    setNewVehicleDraft({ ...emptyVehicleDraft, licensePlate: normalizedPlate });
+    setSelectedVehicleId('');
+    setVehicleSearchInput(normalizedPlate);
     setShowNewVehiclePopup(true);
   };
 
@@ -303,7 +439,6 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
       vehicleType: vehicle.vehicleType || VehicleType.SEDAN,
       vehicleSize: vehicle.vehicleSize || getVehicleSizeForType(vehicle.vehicleType || VehicleType.SEDAN),
     });
-    setUsePlateKeyboard(false);
     setShowNewVehiclePopup(true);
   };
 
@@ -314,9 +449,9 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
 
     await onDeleteVehicle(selectedVehicleId);
     setSelectedVehicleId('');
+    setVehicleSearchInput('');
     setEditingVehicleId(null);
     setNewVehicleDraft(emptyVehicleDraft);
-    setUsePlateKeyboard(false);
   };
 
   const clearFilters = () => {
@@ -369,7 +504,18 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
     }
   };
 
-  const handleSaveCustomer = () => {
+  const resolveAutofillLicensePlate = (): string => {
+    const fromDraft = normalizeLicensePlate(newVehicleDraft.licensePlate || '');
+    if (fromDraft) return fromDraft;
+
+    const fromSearch = normalizeLicensePlate(vehicleSearchInput || '');
+    if (fromSearch) return fromSearch;
+
+    const fromSelected = normalizeLicensePlate(selectedFormVehicle?.licensePlate || '');
+    return fromSelected;
+  };
+
+  const handleSaveCustomer = async (autofillToCheckout = false) => {
     const trimmedName = customerForm.name.trim();
     if (!trimmedName) return;
 
@@ -378,10 +524,12 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
       id: editingCustomer?.id || crypto.randomUUID(),
       name: trimmedName,
       chineseName: customerForm.chineseName.trim(),
+      whatsappEnabled: customerForm.whatsappEnabled,
       countryCode: customerForm.countryCode,
       phone: customerForm.phone.trim(),
       group: customerForm.group,
       birthday: customerForm.birthday || undefined,
+      creditDays: Math.max(0, Math.round(Number(customerForm.creditDays || 0))),
       companyCode: customerForm.companyCode,
       notes: customerForm.notes.trim(),
       vehicleId: selectedVehicleId || undefined,
@@ -418,7 +566,11 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
           ? { existingVehicleId: selectedVehicleId }
           : undefined;
 
-    onSaveCustomer(customer, vehiclePayload);
+    await Promise.resolve(onSaveCustomer(customer, vehiclePayload));
+
+    if (autofillToCheckout && !editingCustomer) {
+      onSaveAndAutofillCheckout?.(customer.id, resolveAutofillLicensePlate());
+    }
 
     closeCustomerForm();
   };
@@ -438,7 +590,7 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
             {language === 'zh' ? '客戶' : 'Customers'}
           </h2>
           <button
-            onClick={beginAdd}
+            onClick={() => beginAdd()}
             disabled={isReadOnly}
             className="w-14 h-14 rounded-full bg-slate-200 dark:bg-white/10 flex items-center justify-center text-slate-700 dark:text-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
             title={language === 'zh' ? '新增客戶' : 'Add Customer'}
@@ -508,7 +660,7 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
       {selectedCustomer && (
         <div className="fixed inset-0 z-[380] bg-slate-900/60 backdrop-blur-sm flex items-end md:items-center justify-center">
           <div className="w-full h-full md:h-auto md:max-w-2xl bg-white dark:bg-slate-900 md:rounded-3xl md:shadow-2xl md:border md:border-white/10 md:max-h-[90vh] overflow-y-auto isolate">
-            <div className="fixed top-0 left-0 right-0 z-[390] bg-white/98 dark:bg-slate-900/98 backdrop-blur-md border-b border-slate-200 dark:border-white/10 flex justify-between items-center px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-4 md:absolute md:top-0 md:left-0 md:right-0 md:rounded-t-3xl">
+            <div className="fixed top-0 left-0 right-0 z-[500] bg-white/98 dark:bg-slate-900/98 backdrop-blur-md border-b border-slate-200 dark:border-white/10 flex justify-between items-center px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-4 md:absolute md:top-0 md:left-0 md:right-0 md:rounded-t-3xl md:z-[50]">
               <button
                 onClick={() => setSelectedCustomerId(null)}
                 className="min-w-[88px] h-11 px-4 flex items-center justify-center gap-2 text-slate-700 dark:text-slate-200 rounded-full bg-slate-100 dark:bg-white/10 hover:bg-slate-200 dark:hover:bg-white/15 transition-colors font-black text-sm"
@@ -546,6 +698,17 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
                     <p className="text-slate-500 font-bold dark:text-slate-400">{selectedCustomer.chineseName}</p>
                   )}
                   <p className="text-slate-500 font-bold dark:text-slate-400">{selectedCustomer.countryCode || ''} {selectedCustomer.phone || (language === 'zh' ? '無電話資料' : 'No phone')}</p>
+                  {selectedCustomer.whatsappEnabled && selectedCustomerWhatsAppUrl && (
+                    <a
+                      href={selectedCustomerWhatsAppUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-green-600 text-white text-xs font-black uppercase tracking-wider"
+                    >
+                      <i className="fab fa-whatsapp"></i>
+                      <span>{language === 'zh' ? '開啟 WhatsApp' : 'Open WhatsApp'}</span>
+                    </a>
+                  )}
                   {selectedCustomer.group && (
                     <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mt-1">{selectedCustomer.group}</p>
                   )}
@@ -559,19 +722,19 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
                   <p className="text-sm font-black text-slate-900 dark:text-white line-clamp-2">{selectedCustomerVehicle?.make || '-'} {selectedCustomerVehicle?.model || ''}</p>
                   <p className="text-xs font-bold text-slate-500">{selectedCustomerVehicle?.licensePlate || (language === 'zh' ? '未設定' : 'Not linked')}</p>
                 </div>
-                <div className="p-4 bg-slate-50 rounded-2xl dark:bg-white/5 text-center">
+                {!hideFinancialData && <div className="p-4 bg-slate-50 rounded-2xl dark:bg-white/5 text-center">
                   <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">{language === 'zh' ? '消費' : 'Spend'}</p>
                   <p className="text-sm font-black text-emerald-600">
-                    ¥{(transactions.filter(tr => tr.customerId === selectedCustomer.id && tr.type === TransactionType.REVENUE).reduce((sum, tr) => sum + tr.amount, 0)).toLocaleString()}
+                    {formatMoney(transactions.filter(tr => tr.customerId === selectedCustomer.id && tr.type === TransactionType.REVENUE).reduce((sum, tr) => sum + tr.amount, 0))}
                   </p>
                   <p className="text-xs font-bold text-slate-500">{transactions.filter(tr => tr.customerId === selectedCustomer.id && tr.type === TransactionType.REVENUE).length} {language === 'zh' ? '次' : 'times'}</p>
-                </div>
-                <div className="p-4 bg-slate-50 rounded-2xl dark:bg-white/5 text-center">
+                </div>}
+                {!hideFinancialData && <div className="p-4 bg-slate-50 rounded-2xl dark:bg-white/5 text-center">
                   <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">{language === 'zh' ? '平均' : 'Avg'}</p>
                   <p className="text-sm font-black text-blue-600">
-                    ¥{Math.round((transactions.filter(tr => tr.customerId === selectedCustomer.id && tr.type === TransactionType.REVENUE).reduce((sum, tr) => sum + tr.amount, 0)) / (transactions.filter(tr => tr.customerId === selectedCustomer.id && tr.type === TransactionType.REVENUE).length || 1)).toLocaleString()}
+                    {formatMoney(Math.round((transactions.filter(tr => tr.customerId === selectedCustomer.id && tr.type === TransactionType.REVENUE).reduce((sum, tr) => sum + tr.amount, 0)) / (transactions.filter(tr => tr.customerId === selectedCustomer.id && tr.type === TransactionType.REVENUE).length || 1)))}
                   </p>
-                </div>
+                </div>}
               </div>
 
               {selectedCustomer.notes && (
@@ -601,7 +764,7 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
                           </div>
                         </div>
                         <p className={`text-sm font-black ${tr.type === TransactionType.REVENUE ? 'text-emerald-600' : 'text-rose-600'}`}>
-                          {tr.type === TransactionType.REVENUE ? '+' : '-'}¥{tr.amount.toLocaleString()}
+                          {hideFinancialData ? '***' : `${tr.type === TransactionType.REVENUE ? '+' : '-'}${formatMoney(tr.amount)}`}
                         </p>
                       </div>
                     ))
@@ -733,13 +896,26 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
               {editingCustomer ? (language === 'zh' ? '編輯客戶' : 'Edit Customer') : (language === 'zh' ? '新增客戶' : 'New Customer')}
             </h3>
 
-            <button
-              onClick={handleSaveCustomer}
-              disabled={isReadOnly || !customerForm.name.trim()}
-              className="px-6 h-12 rounded-full bg-slate-200 dark:bg-white/15 text-slate-500 dark:text-slate-200 font-black text-lg disabled:opacity-50"
-            >
-              {language === 'zh' ? '儲存' : 'Save'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void handleSaveCustomer(false)}
+                disabled={isReadOnly || !customerForm.name.trim()}
+                className="w-12 h-12 rounded-full bg-slate-200 dark:bg-white/15 text-slate-600 dark:text-slate-200 flex items-center justify-center disabled:opacity-50"
+                title={language === 'zh' ? '儲存' : 'Save'}
+                aria-label={language === 'zh' ? '儲存' : 'Save'}
+              >
+                <i className="fas fa-floppy-disk text-lg"></i>
+              </button>
+              <button
+                onClick={() => void handleSaveCustomer(true)}
+                disabled={isReadOnly || !!editingCustomer || !customerForm.name.trim() || !resolveAutofillLicensePlate()}
+                className="w-12 h-12 rounded-full bg-blue-600 text-white flex items-center justify-center disabled:opacity-50"
+                title={language === 'zh' ? '儲存並自動填入銷售草稿' : 'Save and Autofill New Sale'}
+                aria-label={language === 'zh' ? '儲存並自動填入銷售草稿' : 'Save and Autofill New Sale'}
+              >
+                <i className="fas fa-arrow-up-right-from-square text-lg"></i>
+              </button>
+            </div>
           </div>
 
           <div className="px-5 pt-28 py-5 space-y-7 pb-16">
@@ -754,7 +930,7 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
             </div>
 
             <div className="space-y-3">
-              <label className="text-sm font-black text-slate-900 dark:text-white">{language === 'zh' ? '中文名 / 暱稱' : 'Chinese Name / Nickname'}</label>
+              <label className="text-sm font-black text-slate-900 dark:text-white">{language === 'zh' ? '中文名 / 暱稱 / 聯絡方式' : 'Chinese Name / Nickname / Contact Method'}</label>
               <input
                 value={customerForm.chineseName}
                 onChange={e => setCustomerForm(prev => ({ ...prev, chineseName: e.target.value }))}
@@ -764,7 +940,18 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
             </div>
 
             <div className="space-y-3">
-              <label className="text-sm font-black text-slate-900 dark:text-white">{language === 'zh' ? '電話 / WhatsApp' : 'Phone Number / WhatsApp'}</label>
+              <div className="flex items-center justify-between gap-3">
+                <label className="text-sm font-black text-slate-900 dark:text-white">{language === 'zh' ? '電話 / WhatsApp' : 'Phone Number / WhatsApp'}</label>
+                <label className="inline-flex items-center gap-2 text-xs font-black text-slate-700 dark:text-slate-200 select-none">
+                  <input
+                    type="checkbox"
+                    checked={customerForm.whatsappEnabled}
+                    onChange={e => setCustomerForm(prev => ({ ...prev, whatsappEnabled: e.target.checked }))}
+                    className="w-4 h-4 rounded border-slate-300 text-green-600 focus:ring-green-500"
+                  />
+                  <span>WhatsApp</span>
+                </label>
+              </div>
               <div className="grid grid-cols-[120px_1fr] gap-3">
                 <select
                   value={customerForm.countryCode}
@@ -812,42 +999,73 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
                   </button>
                 </div>
               </div>
-              <select
-                value={selectedVehicleId}
-                onChange={e => {
-                  setSelectedVehicleId(e.target.value);
-                  setNewVehicleDraft(emptyVehicleDraft);
-                  setUsePlateKeyboard(false);
-                }}
-                className="w-full h-14 rounded-2xl border border-slate-300 bg-white dark:bg-slate-900 dark:border-white/10 px-4 text-base font-semibold text-slate-900 dark:text-white"
-              >
-                <option value="">{language === 'zh' ? '未選擇車輛' : 'No vehicle selected'}</option>
-                {vehicles.map(vehicle => (
-                  <option key={vehicle.id} value={vehicle.id}>
-                    {(vehicle.licensePlate || '').toUpperCase()} - {vehicle.make || ''} {vehicle.model || ''} {vehicle.color || ''}
-                    {vehicle.vehicleSize === VehicleSize.LARGE ? ' (Large)' : vehicle.vehicleSize === VehicleSize.REGULAR ? ' (Regular)' : ''}
-                  </option>
-                ))}
-              </select>
+              <div className="space-y-2">
+                <input
+                  value={vehicleSearchInput}
+                  onChange={e => handleVehicleSearchChange(e.target.value)}
+                  list="customer-vehicle-plate-list"
+                  placeholder={language === 'zh' ? '搜尋車牌號碼' : 'Search license plate'}
+                  className="w-full h-14 rounded-2xl border border-slate-300 bg-white dark:bg-slate-900 dark:border-white/10 px-4 text-base font-semibold tracking-[0.08em] text-slate-900 dark:text-white"
+                />
+                <datalist id="customer-vehicle-plate-list">
+                  {vehicleSearchOptions.map(vehicle => (
+                    <option key={vehicle.id} value={(vehicle.licensePlate || '').toUpperCase()}>
+                      {(vehicle.make || '').trim()} {(vehicle.model || '').trim()} {(vehicle.color || '').trim()}
+                    </option>
+                  ))}
+                </datalist>
+                {vehicleSearchInput.trim() && !hasMatchingVehiclePlate && (
+                  <button
+                    type="button"
+                    onClick={() => openNewVehiclePopupWithPlate(vehicleSearchInput)}
+                    className="w-full text-left px-4 py-3 rounded-2xl border border-blue-200 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:border-blue-900/30 dark:text-blue-300 text-sm font-bold"
+                  >
+                    {language === 'zh'
+                      ? `新增「${normalizeLicensePlate(vehicleSearchInput)}」為新車輛`
+                      : `Add "${normalizeLicensePlate(vehicleSearchInput)}" as a new vehicle`}
+                  </button>
+                )}
+              </div>
               {newVehicleDraft.licensePlate.trim() && (
-                <div className="p-3 rounded-2xl bg-blue-50 border border-blue-100 text-sm font-bold text-blue-700 dark:bg-blue-900/20 dark:border-blue-900/30 dark:text-blue-300">
-                  {language === 'zh' ? '將新增並連結:' : 'Will create and link:'} {(newVehicleDraft.licensePlate || '').toUpperCase()} {newVehicleDraft.make} {newVehicleDraft.model} {newVehicleDraft.color}
+                <div className="p-3 rounded-2xl bg-blue-50 border border-blue-100 text-sm font-bold text-blue-700 dark:bg-blue-900/20 dark:border-blue-900/30 dark:text-blue-300 flex items-start justify-between gap-3">
+                  <p className="min-w-0">
+                    {language === 'zh' ? '將新增並連結:' : 'Will create and link:'} {(newVehicleDraft.licensePlate || '').toUpperCase()} {newVehicleDraft.make} {newVehicleDraft.model} {newVehicleDraft.color}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setNewVehicleDraft(emptyVehicleDraft)}
+                    className="w-7 h-7 rounded-full bg-white/70 dark:bg-slate-800/60 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0"
+                    title={language === 'zh' ? '取消新增車輛' : 'Cancel add vehicle'}
+                    aria-label={language === 'zh' ? '取消新增車輛' : 'Cancel add vehicle'}
+                  >
+                    <i className="fas fa-times text-xs"></i>
+                  </button>
                 </div>
               )}
             </div>
 
             <div className="pt-2 border-t border-slate-200 dark:border-white/10 space-y-3">
               <label className="text-sm font-black text-slate-900 dark:text-white">{language === 'zh' ? '分組' : 'Group'}</label>
-              <select
+              <input
                 value={customerForm.group}
                 onChange={e => setCustomerForm(prev => ({ ...prev, group: e.target.value }))}
+                list="customer-group-list"
+                autoComplete="off"
+                placeholder={language === 'zh' ? '搜尋或輸入分組' : 'Search or enter group'}
                 className="w-full h-14 rounded-2xl border border-slate-300 bg-white dark:bg-slate-900 dark:border-white/10 px-4 text-base font-semibold text-slate-900 dark:text-white"
-              >
-                <option value="">{language === 'zh' ? '未分組' : 'Ungrouped'}</option>
-                {customerGroups.map(group => (
-                  <option key={group.id} value={group.name}>{group.name}</option>
+              />
+              <datalist id="customer-group-list">
+                {groupOptions.map(groupName => (
+                  <option key={groupName} value={groupName} />
                 ))}
-              </select>
+              </datalist>
+              {customerForm.group.trim() && !hasMatchingGroup && (
+                <div className="px-4 py-3 rounded-2xl border border-emerald-200 bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:border-emerald-900/30 dark:text-emerald-300 text-sm font-bold">
+                  {language === 'zh'
+                    ? `新增「${customerForm.group.trim()}」為新分組`
+                    : `Add "${customerForm.group.trim()}" as a new group`}
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-slate-200 dark:border-white/10">
@@ -864,16 +1082,42 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
                 />
               </div>
               <div className="space-y-3">
+                <label className="text-sm font-black text-slate-900 dark:text-white">{language === 'zh' ? '信用天數' : 'Credit Days'}</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={customerForm.creditDays}
+                  onChange={e => setCustomerForm(prev => ({ ...prev, creditDays: e.target.value }))}
+                  className="w-full h-14 rounded-2xl border border-slate-300 bg-white dark:bg-slate-900 dark:border-white/10 px-4 text-base font-semibold text-slate-900 dark:text-white"
+                  placeholder={language === 'zh' ? '預設 0' : 'Default 0'}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-slate-200 dark:border-white/10">
+              <div className="space-y-3">
                 <label className="text-sm font-black text-slate-900 dark:text-white">{language === 'zh' ? '公司代碼' : 'Company Code'}</label>
-                <select
+                <input
                   value={customerForm.companyCode}
                   onChange={e => setCustomerForm(prev => ({ ...prev, companyCode: e.target.value }))}
+                  list="customer-company-code-list"
+                  autoComplete="off"
+                  placeholder={language === 'zh' ? '搜尋或輸入公司代碼' : 'Search or enter company code'}
                   className="w-full h-14 rounded-2xl border border-slate-300 bg-white dark:bg-slate-900 dark:border-white/10 px-4 text-base font-semibold text-slate-900 dark:text-white"
-                >
+                />
+                <datalist id="customer-company-code-list">
                   {COMPANY_CODES.map(code => (
-                    <option key={code} value={code}>{code}</option>
+                    <option key={code} value={code} />
                   ))}
-                </select>
+                </datalist>
+                {customerForm.companyCode.trim() && !hasMatchingCompanyCode && (
+                  <div className="px-4 py-3 rounded-2xl border border-emerald-200 bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:border-emerald-900/30 dark:text-emerald-300 text-sm font-bold">
+                    {language === 'zh'
+                      ? `新增「${customerForm.companyCode.trim()}」為新公司代碼`
+                      : `Add "${customerForm.companyCode.trim()}" as a new corporate code`}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -901,7 +1145,6 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
                   setShowNewVehiclePopup(false);
                   setEditingVehicleId(null);
                   setNewVehicleDraft(emptyVehicleDraft);
-                  setUsePlateKeyboard(false);
                 }}
                 className="w-9 h-9 rounded-full bg-slate-100 dark:bg-white/10 flex items-center justify-center"
               >
@@ -910,121 +1153,55 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
             </div>
 
             <div className="space-y-3">
-              <div className="space-y-3 rounded-[28px] border border-slate-200 dark:border-white/10 bg-slate-50/70 dark:bg-white/5 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <label className="text-lg font-black text-slate-900 dark:text-white">
-                    {language === 'zh' ? '請輸入車牌' : 'Enter License Plate'}
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setUsePlateKeyboard(prev => !prev);
-                      setSelectedVehicleId('');
-                    }}
-                    className={`px-4 h-10 rounded-full text-[11px] font-black uppercase tracking-widest border ${usePlateKeyboard ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-700 border-slate-300 dark:bg-slate-900 dark:text-slate-200 dark:border-white/10'}`}
-                  >
-                    {language === 'zh' ? '切換車牌鍵盤' : 'Switch'}
-                  </button>
-                </div>
-
-                {!usePlateKeyboard ? (
-                  <input
-                    value={newVehicleDraft.licensePlate}
-                    onChange={e => updatePlateValue(e.target.value)}
-                    placeholder={language === 'zh' ? '車牌號碼' : 'License Plate Number'}
-                    className="w-full h-14 rounded-2xl border border-slate-300 dark:border-white/10 bg-white dark:bg-slate-900 px-4 text-lg font-bold tracking-[0.12em] text-slate-900 dark:text-white"
-                  />
-                ) : (
-                  <div className="space-y-4">
-                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                      <div className="w-14 h-16 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 flex items-center justify-center text-2xl font-black text-slate-900 dark:text-white">
-                        {plateChars[0]}
-                      </div>
-                      <div className="w-14 h-16 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 flex items-center justify-center text-2xl font-black text-slate-900 dark:text-white">
-                        {plateChars[1]}
-                      </div>
-                      <div className="w-4 flex items-center justify-center text-slate-500 text-2xl">•</div>
-                      <div className="w-14 h-16 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 flex items-center justify-center text-2xl font-black text-slate-900 dark:text-white">
-                        {plateChars[2]}
-                      </div>
-                      <div className="w-14 h-16 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 flex items-center justify-center text-2xl font-black text-slate-900 dark:text-white">
-                        {plateChars[3]}
-                      </div>
-                      <div className="w-14 h-16 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 flex items-center justify-center text-2xl font-black text-slate-900 dark:text-white">
-                        {plateChars[4]}
-                      </div>
-                      <div className="w-14 h-16 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 flex items-center justify-center text-2xl font-black text-slate-900 dark:text-white">
-                        {plateChars[5]}
-                      </div>
-                      <div className="w-14 h-16 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 flex items-center justify-center text-2xl font-black text-slate-900 dark:text-white">
-                        {plateChars[6]}
-                      </div>
-                      <div className="w-16 h-16 rounded-2xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-400 flex items-center justify-center text-sm font-black text-emerald-600 dark:text-emerald-300 text-center leading-tight px-1">
-                        {plateChars[7] || (language === 'zh' ? '新能源' : 'EV')}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between text-[11px] font-black uppercase tracking-widest text-slate-400 dark:text-slate-500">
-                      <span>
-                        {language === 'zh' ? `輸入位置 ${nextPlateIndex + 1}` : `Position ${nextPlateIndex + 1}`}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => updatePlateValue('')}
-                        className="text-slate-500 dark:text-slate-300"
-                      >
-                        {language === 'zh' ? '清除' : 'Clear'}
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-7 md:grid-cols-9 gap-2 rounded-[28px] bg-[#d7dbe3] dark:bg-slate-800 p-3">
-                      {plateKeyboardKeys.map(key => (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => handlePlateKey(key)}
-                          className="h-12 rounded-2xl bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-black text-xl shadow-sm"
-                        >
-                          {key}
-                        </button>
-                      ))}
-                      <button
-                        type="button"
-                        onClick={handlePlateBackspace}
-                        className="col-span-2 md:col-span-2 h-12 rounded-2xl bg-slate-300 dark:bg-slate-700 text-slate-900 dark:text-white font-black text-sm uppercase tracking-widest"
-                      >
-                        <i className="fas fa-delete-left mr-2"></i>
-                        {language === 'zh' ? '刪除' : 'Delete'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setShowNewVehiclePopup(false)}
-                        className="col-span-2 md:col-span-2 h-12 rounded-2xl bg-blue-500 text-white font-black text-sm uppercase tracking-widest"
-                      >
-                        {language === 'zh' ? '完成' : 'Done'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
+              <LicensePlateField
+                value={newVehicleDraft.licensePlate}
+                onChange={licensePlate => {
+                  setNewVehicleDraft(prev => ({ ...prev, licensePlate }));
+                  setSelectedVehicleId('');
+                  setVehicleSearchInput('');
+                }}
+                onPlateKeyboardModeChange={setUsePlateKeyboard}
+                language={language}
+              />
               <input
                 value={newVehicleDraft.make}
-                onChange={e => setNewVehicleDraft(prev => ({ ...prev, make: e.target.value }))}
+                onChange={e => setNewVehicleDraft(prev => ({ ...prev, make: e.target.value, model: '' }))}
                 placeholder={language === 'zh' ? '品牌' : 'Make'}
+                list="customer-vehicle-makes-list"
+                autoComplete="off"
                 className="w-full h-12 rounded-xl border border-slate-300 dark:border-white/10 bg-white dark:bg-slate-900 px-3 font-semibold"
               />
+              <datalist id="customer-vehicle-makes-list">
+                {autofillMakes.map(make => (
+                  <option key={make} value={make} />
+                ))}
+              </datalist>
               <input
                 value={newVehicleDraft.model}
                 onChange={e => setNewVehicleDraft(prev => ({ ...prev, model: e.target.value }))}
                 placeholder={language === 'zh' ? '型號' : 'Model'}
+                list="customer-vehicle-models-list"
+                autoComplete="off"
                 className="w-full h-12 rounded-xl border border-slate-300 dark:border-white/10 bg-white dark:bg-slate-900 px-3 font-semibold"
               />
+              <datalist id="customer-vehicle-models-list">
+                {autofillModels.map(model => (
+                  <option key={model} value={model} />
+                ))}
+              </datalist>
               <input
                 value={newVehicleDraft.color}
                 onChange={e => setNewVehicleDraft(prev => ({ ...prev, color: e.target.value }))}
                 placeholder={language === 'zh' ? '顏色' : 'Color'}
+                list="customer-vehicle-colors-list"
+                autoComplete="off"
                 className="w-full h-12 rounded-xl border border-slate-300 dark:border-white/10 bg-white dark:bg-slate-900 px-3 font-semibold"
               />
+              <datalist id="customer-vehicle-colors-list">
+                {autofillColors.map(color => (
+                  <option key={color} value={color} />
+                ))}
+              </datalist>
               <div className="grid grid-cols-2 gap-3">
                 <select
                   value={newVehicleDraft.vehicleType}
@@ -1099,7 +1276,7 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
       )}
 
       {deleteConfirm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[600] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
           <div className="bg-white dark:bg-slate-900 w-full max-w-sm rounded-[32px] shadow-2xl p-8 border border-white/10">
             <h3 className="text-xl font-black text-slate-900 dark:text-white mb-4 uppercase tracking-tight">
               {language === 'zh' ? '確認刪除' : 'Confirm Delete'}

@@ -1,0 +1,17 @@
+Field name,X,Y,font size,alignment,example
+Order Number,90,8,9,center,260001
+Date,215,14,9,center,3/1/2026
+Expected Pickup,214,9,9,center,3/1/2026 14:00
+License Plate,10,20,38,left,CYFS 188
+Car Make,130,20,9,center,Toyota
+Car Model,130,26,9,center,RAV4
+Car Color,130,32,9,center,White
+Time In,150,9,9,center,3/1/2026 10:00
+Customer Name,8,33,22,left,Chan Tai Man
+Sales Notes,130,120,9,left,lite scratch on door
+Customer Requirement,16,100,9,left,deep clean interior
+Line item description,16,48,8,left,Car Wash
+Qty,77,48,8,center,1
+Unit price,96,48,8,right,135
+Amount,116,48,8,right,135
+Total,116,68,9,right,135

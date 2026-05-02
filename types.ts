@@ -95,12 +95,15 @@ export interface Transaction {
   paymentStatus?: PaymentStatus;
   paymentMethod?: PaymentMethod;
   paymentCurrency?: PaymentCurrency;
+  currency?: PaymentCurrency;
+  paymentAmount?: number;
 }
 
 export interface Customer {
   id: string;
   name: string;
   chineseName?: string;
+  whatsappEnabled?: boolean;
   firstName?: string;
   lastName?: string;
   group?: string;
@@ -120,6 +123,7 @@ export interface Customer {
   birthDay?: string;
   birthYear?: string;
   subscribeToEmailMarketing?: boolean;
+  creditDays?: number;
   notes?: string;
   createdAt: string;
   updatedAt: string;
@@ -143,9 +147,13 @@ export interface Vehicle {
 
 export enum VehicleType {
   SEDAN = 'sedan',
+  HATCHBACK = 'hatchback',
+  WAGON = 'wagon',
   COUPE = 'coupe',
   SPORTS = 'sports',
+  CROSSOVER = 'crossover',
   SUV = 'suv',
+  OFFROAD = 'offroad',
   PICKUP = 'pickup',
   MPV = 'mpv',
   VAN = 'van',
@@ -239,6 +247,8 @@ export interface CategoryItem {
   imageUrl?: string;
   estimatedDurationMinutes?: number;
   isActiveService?: boolean;
+  itemCategory?: string;
+  notSoldSeparately?: boolean;
 }
 
 export interface DiscountItem {
@@ -256,6 +266,8 @@ export interface DiscountItem {
 export enum CheckoutOrderStatus {
   DRAFT = 'draft',
   COMMITTED = 'committed',
+  IN_PROGRESS = 'in_progress',
+  TASK_COMPLETED = 'task_completed',
   CHECKED_OUT = 'checked_out'
 }
 
@@ -276,6 +288,15 @@ export enum PaymentCurrency {
   HKD = 'HKD',
   RMB = 'RMB',
   MOP = 'MOP'
+}
+
+export interface CurrencyExchangeRate {
+  id: string;
+  fromCurrency: PaymentCurrency;
+  toCurrency: PaymentCurrency;
+  rate: number;
+  effectiveDate: string;
+  createdAt: string;
 }
 
 export interface CheckoutOrderLine {
@@ -314,12 +335,24 @@ export interface CheckoutOrder {
   estimatedDurationMinutes: number;
   estimatedFinishAt?: string;
   notes?: string;
+  preWorkRequirement?: string;
+  inProgressNote?: string;
+  postWorkNote?: string;
+  attentionDetails?: string[];
+  customerAdditionalComments?: string[];
+  preInspectionCompleted?: boolean;
+  preInspectionCompletedAt?: string;
+  inProgressAt?: string;
+  taskCompletedAt?: string;
   paymentStatus?: PaymentStatus;
   paymentMethod?: PaymentMethod;
   paymentCurrency?: PaymentCurrency;
-  paidAmount?: number;
+  currency: PaymentCurrency;
+  paymentAmount?: number;
+  appliedRate?: number;
   paidAt?: string;
   linkedTransactionId?: string;
+  invoiceNumber?: string;
   createdAt: string;
   updatedAt?: string;
   lines: CheckoutOrderLine[];
@@ -461,4 +494,92 @@ export interface BankBalanceTransaction {
   balanceBefore: number;
   balanceAfter: number;
   createdAt: string;
+}
+
+export type UserRole = 'admin' | 'employee';
+
+export type AppointmentStatus = 'PENDING' | 'CONFIRMED' | 'CANCELLED';
+
+export interface Appointment {
+  id: string;
+  status: AppointmentStatus;
+  customerId: string;
+  vehicleId: string;
+  scheduledAt: string;
+  serviceCategoryIds: string[];
+  notes?: string;
+  cancelledReason?: string;
+  linkedCheckoutOrderId?: string;
+  convertedAt?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export type EmployeePageKey =
+  | 'overview'
+  | 'transactions'
+  | 'input'
+  | 'startup'
+  | 'balance'
+  | 'settings'
+  | 'audit'
+  | 'notes'
+  | 'customers'
+  | 'vehicles'
+  | 'checkout'
+  | 'completed_checkout'
+  | 'service_lifecycle'
+  | 'categories'
+  | 'accounts'
+  | 'memberships'
+  | 'charging'
+  | 'appointments';
+
+export interface EmployeeUser {
+  id: string;
+  username: string;
+  isActive: boolean;
+  hideFinancialData: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EmployeePagePermission {
+  id: string;
+  username: string;
+  pageKey: EmployeePageKey;
+  canView: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ChargingStatus = 'IDLE' | 'CHARGING' | 'COMPLETED';
+
+export interface ChargingRateConfig {
+  id: string;
+  name: string;
+  costPerKwh: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface ChargingSession {
+  id: string;
+  status: ChargingStatus;
+  customerId: string;
+  vehicleId: string;
+  meterAtStart: number;
+  meterAtEnd?: number;
+  currentMeterSnapshot: number;
+  consumedKwh?: number;
+  ratePerKwh?: number;
+  amount?: number;
+  gapKwh?: number;
+  gapTransactionId?: string;
+  gapConfirmed?: boolean;
+  startedAt: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt?: string;
 }

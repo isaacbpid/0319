@@ -305,7 +305,7 @@ const CashForecast: React.FC<CashForecastProps> = ({ summary, transactions, acco
         <div className="bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-800/20 rounded-2xl p-4 flex items-center gap-3 text-rose-600 dark:text-rose-400">
           <i className="fas fa-lock text-sm"></i>
           <span className="text-xs font-bold uppercase tracking-widest">
-            {language === 'zh' ? '連接不穩定，目前處於唯讀模式。' : 'Connection unstable. Currently in Read-Only mode.'}
+            {language === 'zh' ? '連接不穩定，目前處於唯讀模式。' : 'Network unstable. Read-only mode.'}
           </span>
         </div>
       )}

@@ -1,7 +1,7 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { CloudConfig, CategoryItem, TransactionType } from '../types';
+import { CloudConfig, CategoryItem, TransactionType, EmployeePageKey, EmployeePagePermission, EmployeeUser } from '../types';
 import { translations } from '../translations';
 import { reserveNextCategoryId, testConnection } from '../services/database';
 
@@ -22,6 +22,17 @@ interface SettingsPageProps {
   onSaveCategories: (cats: CategoryItem[]) => Promise<void>;
   onDeleteCategory: (id: string) => Promise<void>;
   isReadOnly?: boolean;
+  isAdmin?: boolean;
+  employeeUsers?: EmployeeUser[];
+  employeePermissions?: EmployeePagePermission[];
+  onSaveEmployeeUser?: (params: {
+    username: string;
+    password?: string;
+    isActive: boolean;
+    hideFinancialData: boolean;
+  }) => Promise<void>;
+  onSaveEmployeePermissions?: (username: string, pageKeys: EmployeePageKey[]) => Promise<void>;
+  allPageOptions?: EmployeePageKey[];
 }
 
 const SettingsPage: React.FC<SettingsPageProps> = ({ 
@@ -40,7 +51,13 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   categories,
   onSaveCategories,
   onDeleteCategory,
-  isReadOnly
+  isReadOnly,
+  isAdmin,
+  employeeUsers = [],
+  employeePermissions = [],
+  onSaveEmployeeUser,
+  onSaveEmployeePermissions,
+  allPageOptions = []
 }) => {
   const t = translations[language];
   const [tempConfig, setTempConfig] = useState<CloudConfig>(cloudConfig || { url: '', key: '' });
@@ -55,6 +72,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   const handleBannerClick = () => {
+    if (!isAdmin) return;
     const newCount = clickCount + 1;
     setClickCount(newCount);
     if (newCount >= 5) {
@@ -78,6 +96,101 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   const [newCategoryName, setNewCategoryName] = useState('');
   const [newCategoryType, setNewCategoryType] = useState<TransactionType>(TransactionType.REVENUE);
   const [isSavingCategories, setIsSavingCategories] = useState(false);
+  const [selectedEmployeeUsername, setSelectedEmployeeUsername] = useState('');
+  const [employeeDraftUsername, setEmployeeDraftUsername] = useState('');
+  const [employeeDraftPassword, setEmployeeDraftPassword] = useState('');
+  const [employeeDraftIsActive, setEmployeeDraftIsActive] = useState(true);
+  const [employeeDraftHideFinancialData, setEmployeeDraftHideFinancialData] = useState(true);
+  const [selectedPages, setSelectedPages] = useState<EmployeePageKey[]>([]);
+
+  const permissionByUser = useMemo(() => {
+    const map = new Map<string, EmployeePagePermission[]>();
+    for (const permission of employeePermissions) {
+      const key = permission.username.toLowerCase();
+      if (!map.has(key)) {
+        map.set(key, []);
+      }
+      map.get(key)!.push(permission);
+    }
+    return map;
+  }, [employeePermissions]);
+
+  const sortedEmployeeUsers = useMemo(() => {
+    return [...employeeUsers].sort((a, b) => a.username.localeCompare(b.username));
+  }, [employeeUsers]);
+
+  const getVisiblePageCount = (username: string): number => {
+    const entries = permissionByUser.get(username.toLowerCase()) || [];
+    return entries.filter((entry) => entry.canView).length;
+  };
+
+  const formatUpdatedAt = (value?: string): string => {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '-';
+    return date.toLocaleString(language === 'zh' ? 'zh-HK' : 'en-US', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  };
+
+  useEffect(() => {
+    if (!selectedEmployeeUsername) {
+      setSelectedPages([]);
+      return;
+    }
+
+    const normalized = selectedEmployeeUsername.toLowerCase();
+    const selectedUser = employeeUsers.find((user) => user.username.toLowerCase() === normalized);
+    const existingPermissions = permissionByUser.get(normalized) || [];
+
+    setEmployeeDraftUsername(selectedUser?.username || selectedEmployeeUsername);
+    setEmployeeDraftPassword('');
+    setEmployeeDraftIsActive(selectedUser?.isActive ?? true);
+    setEmployeeDraftHideFinancialData(selectedUser?.hideFinancialData ?? true);
+    setSelectedPages(existingPermissions.filter((item) => item.canView).map((item) => item.pageKey));
+  }, [selectedEmployeeUsername, employeeUsers, permissionByUser]);
+
+  const handleSaveEmployee = async () => {
+    if (!onSaveEmployeeUser) return;
+    if (!employeeDraftUsername.trim()) return;
+
+    const normalizedUsername = employeeDraftUsername.trim().toLowerCase();
+
+    await onSaveEmployeeUser({
+      username: normalizedUsername,
+      password: employeeDraftPassword.trim() || undefined,
+      isActive: employeeDraftIsActive,
+      hideFinancialData: employeeDraftHideFinancialData,
+    });
+
+    // Keep permission changes in sync with the main save action.
+    if (onSaveEmployeePermissions) {
+      await onSaveEmployeePermissions(normalizedUsername, selectedPages);
+    }
+
+    setEmployeeDraftPassword('');
+    setSelectedEmployeeUsername(normalizedUsername);
+  };
+
+  const handleSavePermissions = async () => {
+    if (!onSaveEmployeePermissions) return;
+    if (!selectedEmployeeUsername) return;
+
+    await onSaveEmployeePermissions(selectedEmployeeUsername, selectedPages);
+  };
+
+  const togglePagePermission = (pageKey: EmployeePageKey) => {
+    setSelectedPages((current) => {
+      if (current.includes(pageKey)) {
+        return current.filter((value) => value !== pageKey);
+      }
+      return [...current, pageKey];
+    });
+  };
 
   const getNextCategoryIdLocal = (type: TransactionType): string => {
     const prefix = type === TransactionType.REVENUE ? 'rev' : 'exp';
@@ -338,10 +451,35 @@ create table if not exists checkout_line_items (
   id text primary key,
   sale_id text not null references checkout_sales(id) on delete cascade,
   name text not null,
+  service_name_snapshot text not null default '',
+  item_description text,
   price numeric not null,
+  not_sold_separately boolean not null default false,
   is_discount boolean not null default false,
   created_at timestamp with time zone default now()
 );
+
+create or replace function normalize_checkout_line_item_row()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.sale_id is not null then
+    insert into checkout_sales (id)
+    values (new.sale_id)
+    on conflict (id) do nothing;
+  end if;
+
+  new.service_name_snapshot := coalesce(new.service_name_snapshot, new.name, '');
+  new.not_sold_separately := coalesce(new.not_sold_separately, false);
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_checkout_line_items_normalize on checkout_line_items;
+create trigger trg_checkout_line_items_normalize
+before insert or update on checkout_line_items
+for each row execute function normalize_checkout_line_item_row();
 
 -- 11. Create Discounts table
 create table if not exists discounts (
@@ -390,6 +528,7 @@ alter table checkout_sales disable row level security;
 alter table checkout_line_items disable row level security;
 alter table discounts disable row level security;
 alter table transaction_items disable row level security;
+alter table if exists currency_exchange_rates disable row level security;
 
 -- 13. GRANT FULL ACCESS
 grant all on table transactions to anon;
@@ -422,6 +561,8 @@ grant all on table discounts to anon;
 grant all on table discounts to authenticated;
 grant all on table transaction_items to anon;
 grant all on table transaction_items to authenticated;
+grant all on table currency_exchange_rates to anon;
+grant all on table currency_exchange_rates to authenticated;
 
 -- 14. Enable Realtime Sync
 begin;
@@ -435,7 +576,89 @@ grant execute on function reserve_next_category_id(text) to authenticated;
 -- 15. Server Time Function
 create or replace function get_server_time() returns timestamp with time zone as $$
   select now();
-$$ language sql stable;`;
+$$ language sql stable;
+
+-- 16. Employee Access Control
+create table if not exists public.employee_users (
+  id text primary key,
+  username text not null unique,
+  password_hash text not null,
+  is_active boolean not null default true,
+  hide_financial_data boolean not null default true,
+  created_at timestamp with time zone not null default now(),
+  updated_at timestamp with time zone not null default now(),
+  constraint employee_users_username_lowercase
+    check (username = lower(trim(username)))
+);
+
+create table if not exists public.employee_page_permissions (
+  id text primary key,
+  username text not null
+    references public.employee_users(username)
+    on update cascade
+    on delete cascade,
+  page_key text not null,
+  can_view boolean not null default true,
+  created_at timestamp with time zone not null default now(),
+  updated_at timestamp with time zone not null default now(),
+  constraint employee_page_permissions_username_page_unique
+    unique (username, page_key),
+  constraint employee_page_permissions_username_lowercase
+    check (username = lower(trim(username))),
+  constraint employee_page_permissions_page_key_chk
+    check (page_key in (
+      'overview', 'transactions', 'input', 'startup', 'balance',
+      'settings', 'audit', 'notes', 'customers', 'vehicles',
+      'checkout', 'categories', 'accounts', 'memberships', 'charging', 'appointments'
+    ))
+);
+
+alter table public.employee_users disable row level security;
+alter table public.employee_page_permissions disable row level security;
+
+grant all on table public.employee_users to anon;
+grant all on table public.employee_users to authenticated;
+grant all on table public.employee_page_permissions to anon;
+grant all on table public.employee_page_permissions to authenticated;
+
+do $$
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    begin
+      alter publication supabase_realtime add table public.employee_users;
+    exception when duplicate_object then null;
+    end;
+    begin
+      alter publication supabase_realtime add table public.employee_page_permissions;
+    exception when duplicate_object then null;
+    end;
+  end if;
+end $$;
+
+notify pgrst, 'reload schema';
+
+-- 17. Seed default employee account
+-- username: staff
+-- password: 1234
+insert into public.employee_users (id, username, password_hash, is_active, hide_financial_data)
+values (
+  'emp_default_staff',
+  'staff',
+  '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4',
+  true,
+  false
+)
+on conflict (username) do nothing;
+
+insert into public.employee_page_permissions (id, username, page_key, can_view)
+values
+  ('epp_staff_transactions', 'staff', 'transactions', true),
+  ('epp_staff_input', 'staff', 'input', true),
+  ('epp_staff_customers', 'staff', 'customers', true),
+  ('epp_staff_vehicles', 'staff', 'vehicles', true),
+  ('epp_staff_checkout', 'staff', 'checkout', true),
+  ('epp_staff_settings', 'staff', 'settings', true)
+on conflict (username, page_key) do nothing;`;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(sqlScript).then(() => {
@@ -450,7 +673,7 @@ $$ language sql stable;`;
         <div className="bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-800/20 rounded-2xl p-4 flex items-center gap-3 text-rose-600 dark:text-rose-400">
           <i className="fas fa-lock text-sm"></i>
           <span className="text-xs font-bold uppercase tracking-widest">
-            {language === 'zh' ? '連接不穩定，目前處於唯讀模式。' : 'Connection unstable. Currently in Read-Only mode.'}
+            {language === 'zh' ? '連接不穩定，目前處於唯讀模式。' : 'Network unstable. Read-only mode.'}
           </span>
         </div>
       )}
@@ -642,7 +865,7 @@ $$ language sql stable;`;
             </div>
         </div>
 
-        <div className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-100 space-y-6 dark:bg-slate-900 dark:border-white/10">
+        {isAdmin && <div className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-100 space-y-6 dark:bg-slate-900 dark:border-white/10">
             <h3 className="text-sm font-black uppercase tracking-[0.2em] text-slate-800 flex items-center dark:text-white">
               <i className="fas fa-history text-slate-500 mr-2"></i>
               {language === 'zh' ? '系統日誌' : 'System Logs'}
@@ -656,7 +879,7 @@ $$ language sql stable;`;
             >
               <i className="fas fa-history mr-2"></i> {t.auditLogs}
             </button>
-        </div>
+        </div>}
 
         {/* Category Management Section */}
         <div className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-100 space-y-6 md:col-span-2 dark:bg-slate-900 dark:border-white/10">
@@ -676,7 +899,11 @@ $$ language sql stable;`;
                     <div key={cat.id} className="flex items-center justify-between bg-emerald-50/50 p-3 rounded-2xl border border-emerald-100 dark:bg-emerald-900/10 dark:border-emerald-900/20">
                       <span className="text-xs font-bold text-emerald-700 dark:text-emerald-400">{cat.name}</span>
                       <button 
-                        onClick={() => onDeleteCategory(cat.id)} 
+                        onClick={() => {
+                          if (isReadOnly) return;
+                          onDeleteCategory(cat.id);
+                        }} 
+                        disabled={isReadOnly}
                         className="w-8 h-8 rounded-full flex items-center justify-center text-rose-500 hover:bg-rose-50 transition-all dark:hover:bg-rose-900/20"
                       >
                         <i className="fas fa-trash-alt text-xs"></i>
@@ -699,7 +926,11 @@ $$ language sql stable;`;
                     <div key={cat.id} className="flex items-center justify-between bg-rose-50/50 p-3 rounded-2xl border border-rose-100 dark:bg-rose-900/10 dark:border-rose-900/20">
                       <span className="text-xs font-bold text-rose-700 dark:text-rose-400">{cat.name}</span>
                       <button 
-                        onClick={() => onDeleteCategory(cat.id)} 
+                        onClick={() => {
+                          if (isReadOnly) return;
+                          onDeleteCategory(cat.id);
+                        }} 
+                        disabled={isReadOnly}
                         className="w-8 h-8 rounded-full flex items-center justify-center text-rose-500 hover:bg-rose-50 transition-all dark:hover:bg-rose-900/20"
                       >
                         <i className="fas fa-trash-alt text-xs"></i>
@@ -755,6 +986,172 @@ $$ language sql stable;`;
             </div>
         </div>
       </div>
+
+      {isAdmin && (
+        <div className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-100 space-y-6 dark:bg-slate-900 dark:border-white/10">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-black uppercase tracking-[0.2em] text-slate-800 flex items-center dark:text-white">
+              <i className="fas fa-user-shield text-violet-500 mr-2"></i>
+              {language === 'zh' ? '員工帳號與頁面權限' : 'Employee Accounts And Page Access'}
+            </h3>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="space-y-4">
+              <div className="rounded-2xl border border-slate-200 dark:border-white/10 overflow-hidden">
+                <div className="px-4 py-3 bg-slate-50 dark:bg-white/5 border-b border-slate-200 dark:border-white/10">
+                  <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    {language === 'zh' ? '員工完整列表' : 'Full Employee List'}
+                  </h4>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-slate-50 dark:bg-white/5 text-slate-500">
+                      <tr>
+                        <th className="text-left px-3 py-2 text-[10px] font-black uppercase tracking-widest">{language === 'zh' ? '用戶名' : 'Username'}</th>
+                        <th className="text-left px-3 py-2 text-[10px] font-black uppercase tracking-widest">{language === 'zh' ? '狀態' : 'Status'}</th>
+                        <th className="text-left px-3 py-2 text-[10px] font-black uppercase tracking-widest">{language === 'zh' ? '隱藏財務' : 'Hide Financial'}</th>
+                        <th className="text-left px-3 py-2 text-[10px] font-black uppercase tracking-widest">{language === 'zh' ? '頁面數' : 'Pages'}</th>
+                        <th className="text-left px-3 py-2 text-[10px] font-black uppercase tracking-widest">{language === 'zh' ? '更新時間' : 'Updated'}</th>
+                        <th className="text-right px-3 py-2 text-[10px] font-black uppercase tracking-widest">{language === 'zh' ? '操作' : 'Action'}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedEmployeeUsers.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="px-3 py-4 text-xs font-bold text-slate-400 text-center">
+                            {language === 'zh' ? '尚無員工帳號' : 'No employee accounts yet'}
+                          </td>
+                        </tr>
+                      ) : (
+                        sortedEmployeeUsers.map((user) => (
+                          <tr key={user.id} className="border-t border-slate-100 dark:border-white/5">
+                            <td className="px-3 py-2 font-bold text-slate-800 dark:text-slate-100">{user.username}</td>
+                            <td className="px-3 py-2">
+                              <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${user.isActive ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' : 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300'}`}>
+                                {user.isActive
+                                  ? (language === 'zh' ? '啟用' : 'Active')
+                                  : (language === 'zh' ? '停用' : 'Inactive')}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-xs font-bold text-slate-600 dark:text-slate-300">
+                              {user.hideFinancialData ? (language === 'zh' ? '是' : 'Yes') : (language === 'zh' ? '否' : 'No')}
+                            </td>
+                            <td className="px-3 py-2 text-xs font-bold text-slate-600 dark:text-slate-300">{getVisiblePageCount(user.username)}</td>
+                            <td className="px-3 py-2 text-xs font-bold text-slate-500 dark:text-slate-400">{formatUpdatedAt(user.updatedAt)}</td>
+                            <td className="px-3 py-2 text-right">
+                              <button
+                                onClick={() => setSelectedEmployeeUsername(user.username)}
+                                className="px-3 py-1.5 bg-slate-900 text-white rounded-lg text-[10px] font-black uppercase tracking-widest dark:bg-white dark:text-slate-900"
+                              >
+                                {language === 'zh' ? '編輯' : 'Edit'}
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400">
+                {language === 'zh' ? '選擇員工' : 'Select Employee'}
+              </label>
+              <select
+                value={selectedEmployeeUsername}
+                onChange={(e) => setSelectedEmployeeUsername(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:bg-slate-800 dark:border-white/5 dark:text-white"
+              >
+                <option value="">{language === 'zh' ? '新增員工帳號' : 'Create New Employee'}</option>
+                {sortedEmployeeUsers.map((user) => (
+                  <option key={user.id} value={user.username}>
+                    {user.username}{user.isActive ? '' : ` (${language === 'zh' ? '停用' : 'inactive'})`}
+                  </option>
+                ))}
+              </select>
+
+              <input
+                type="text"
+                value={employeeDraftUsername}
+                onChange={(e) => setEmployeeDraftUsername(e.target.value)}
+                placeholder={language === 'zh' ? '員工用戶名' : 'Employee username'}
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:bg-slate-800 dark:border-white/5 dark:text-white"
+              />
+
+              <input
+                type="password"
+                value={employeeDraftPassword}
+                onChange={(e) => setEmployeeDraftPassword(e.target.value)}
+                placeholder={selectedEmployeeUsername
+                  ? (language === 'zh' ? '重設密碼（可留空）' : 'Reset password (optional)')
+                  : (language === 'zh' ? '設定初始密碼' : 'Set initial password')}
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-900 dark:bg-slate-800 dark:border-white/5 dark:text-white"
+              />
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <label className="flex items-center gap-2 text-sm font-bold text-slate-600 dark:text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={employeeDraftIsActive}
+                    onChange={(e) => setEmployeeDraftIsActive(e.target.checked)}
+                  />
+                  {language === 'zh' ? '帳號啟用' : 'Account Active'}
+                </label>
+                <label className="flex items-center gap-2 text-sm font-bold text-slate-600 dark:text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={employeeDraftHideFinancialData}
+                    onChange={(e) => setEmployeeDraftHideFinancialData(e.target.checked)}
+                  />
+                  {language === 'zh' ? '隱藏財務數字' : 'Hide Financial Numbers'}
+                </label>
+              </div>
+
+              <button
+                onClick={handleSaveEmployee}
+                disabled={(!isAdmin && isReadOnly) || !employeeDraftUsername.trim() || (!selectedEmployeeUsername && !employeeDraftPassword.trim())}
+                className="w-full py-3 bg-violet-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest disabled:opacity-50"
+              >
+                {language === 'zh' ? '儲存員工帳號' : 'Save Employee Account'}
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400">
+                {language === 'zh' ? '可見頁面權限' : 'Visible Page Permissions'}
+              </label>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {allPageOptions.map((pageKey) => (
+                  <label key={pageKey} className="flex items-center gap-2 p-2 rounded-lg bg-slate-50 dark:bg-white/5 text-sm font-bold text-slate-700 dark:text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={selectedPages.includes(pageKey)}
+                      onChange={() => togglePagePermission(pageKey)}
+                      disabled={!selectedEmployeeUsername}
+                    />
+                    <span>{pageKey}</span>
+                  </label>
+                ))}
+              </div>
+
+              <button
+                onClick={handleSavePermissions}
+                disabled={(!isAdmin && isReadOnly) || !selectedEmployeeUsername}
+                className="w-full py-3 bg-slate-900 text-white rounded-xl font-black text-[10px] uppercase tracking-widest disabled:opacity-50"
+              >
+                {language === 'zh' ? '儲存頁面權限' : 'Save Page Permissions'}
+              </button>
+
+              <p className="text-[11px] font-bold text-slate-400">
+                {language === 'zh'
+                  ? '建議員工預設頁面：transactions、input、settings、vehicles、customers'
+                  : 'Recommended default pages for employees: transactions, input, settings, vehicles, customers'}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Security Advice */}

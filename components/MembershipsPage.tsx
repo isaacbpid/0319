@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import CustomerPromptSelect from './CustomerPromptSelect';
 import { Customer, CustomerMembership, MembershipTier } from '../types';
 
 interface MembershipsPageProps {
@@ -261,16 +262,15 @@ const MembershipsPage: React.FC<MembershipsPageProps> = ({
         </h3>
 
         <div className="grid md:grid-cols-3 gap-3">
-          <select
+          <CustomerPromptSelect
             value={selectedCustomerId}
-            onChange={event => setSelectedCustomerId(event.target.value)}
+            onChange={setSelectedCustomerId}
+            options={customers.map(customer => ({ id: customer.id, name: customer.name }))}
+            language={language}
+            promptText={language === 'zh' ? '新增客戶' : 'Add a customer'}
+            emptyOptionText={language === 'zh' ? '選擇客戶' : 'Select customer'}
             className="rounded-xl border border-slate-300 dark:border-white/10 bg-transparent px-3 py-2 text-sm font-bold text-slate-900 dark:text-white"
-          >
-            <option value="">{language === 'zh' ? '選擇客戶' : 'Select customer'}</option>
-            {customers.map(customer => (
-              <option key={customer.id} value={customer.id}>{customer.name}</option>
-            ))}
-          </select>
+          />
 
           <select
             value={selectedTierId}

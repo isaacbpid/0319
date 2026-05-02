@@ -1,6 +1,7 @@
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Transaction, TransactionItem, TransactionType, Category, Owner, CategoryItem, Customer, Account, AccountType } from '../types';
+import ServiceItemPicker from './ServiceItemPicker';
 import { scanReceipt } from '../services/geminiService';
 import { translations } from '../translations';
 
@@ -34,9 +35,10 @@ interface TransactionFormProps {
   accounts: Account[];
   isSyncing?: boolean;
   isReadOnly?: boolean;
+  onlyRevenueMode?: boolean;
 }
 
-const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, transactions, categories, customers, accounts, isSyncing, isReadOnly }) => {
+const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, transactions, categories, customers, accounts, isSyncing, isReadOnly, onlyRevenueMode }) => {
   const t = translations[language];
   const [loading, setLoading] = useState(false);
   const [isSplit, setIsSplit] = useState(true); // Default to split
@@ -286,6 +288,18 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
   }, [formData.type]);
 
   useEffect(() => {
+    if (!onlyRevenueMode) return;
+
+    setFormData((prev) => {
+      if (prev.type === TransactionType.REVENUE) return prev;
+      return {
+        ...prev,
+        type: TransactionType.REVENUE,
+      };
+    });
+  }, [onlyRevenueMode]);
+
+  useEffect(() => {
     if (!isSplit) setShowSplitInfo(false);
   }, [isSplit]);
 
@@ -352,8 +366,26 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
     }));
   };
 
+  const [isServicePickerOpen, setIsServicePickerOpen] = useState(false);
+  const [pickerTargetItemId, setPickerTargetItemId] = useState<string | null>(null);
+
+  const openPickerForExisting = (serviceItemId: string) => {
+    setPickerTargetItemId(serviceItemId);
+    setIsServicePickerOpen(true);
+  };
+
   const handleNewCategory = () => {
-    setServiceItems(prev => [...prev, createServiceItemDraft(filteredCategories[0]?.id || '')]);
+    const newDraft = createServiceItemDraft('');
+    setServiceItems(prev => [...prev, newDraft]);
+    setPickerTargetItemId(newDraft.id);
+    setIsServicePickerOpen(true);
+  };
+
+  const handlePickerSelect = (cat: CategoryItem) => {
+    if (!pickerTargetItemId) return;
+    updateServiceItem(pickerTargetItemId, { categoryId: cat.id, price: String(cat.price ?? '') });
+    setIsServicePickerOpen(false);
+    setPickerTargetItemId(null);
   };
 
   const updateServiceItem = (id: string, patch: Partial<ServiceItemDraft>) => {
@@ -620,7 +652,7 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
         <div className="bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-800/20 rounded-2xl p-4 flex items-center gap-3 text-rose-600 dark:text-rose-400">
           <i className="fas fa-lock text-sm"></i>
           <span className="text-xs font-bold uppercase tracking-widest">
-            {language === 'zh' ? '連接不穩定，目前處於唯讀模式。' : 'Connection unstable. Currently in Read-Only mode.'}
+            {language === 'zh' ? '連接不穩定，目前處於唯讀模式。' : 'Network unstable. Read-only mode.'}
           </span>
         </div>
       )}
@@ -688,9 +720,9 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
               <div className="h-7 mb-2 flex items-center">
                 <label className="block text-[10px] font-black text-slate-400 dark:text-slate-300 uppercase tracking-widest">{t.type}</label>
               </div>
-              <select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value as TransactionType})} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none appearance-none dark:bg-slate-800 dark:border-white/5 dark:text-white">
+              <select value={formData.type} onChange={e => setFormData({...formData, type: e.target.value as TransactionType})} disabled={onlyRevenueMode} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none appearance-none dark:bg-slate-800 dark:border-white/5 dark:text-white disabled:opacity-60">
                 <option value={TransactionType.REVENUE}>{t.revenue}</option>
-                <option value={TransactionType.EXPENSE}>{t.expense}</option>
+                {!onlyRevenueMode && <option value={TransactionType.EXPENSE}>{t.expense}</option>}
               </select>
             </div>
             <div>
@@ -1026,17 +1058,19 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
                       </button>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-[1.7fr_1fr] gap-3">
-                      <select
-                        value={item.categoryId}
-                        onChange={e => updateServiceItem(item.id, { categoryId: e.target.value })}
+                      <button
+                        type="button"
                         data-validation-field="serviceItems"
-                        className={getFieldClasses('serviceItems', 'w-full bg-white border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none appearance-none dark:bg-slate-900 dark:border-white/10 dark:text-white')}
+                        onClick={() => openPickerForExisting(item.id)}
+                        className={getFieldClasses('serviceItems', 'w-full bg-white border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold text-slate-900 text-left flex items-center justify-between hover:border-blue-300 transition-all dark:bg-slate-900 dark:border-white/10 dark:text-white')}
                       >
-                        <option value="">{isRevenue ? (language === 'zh' ? '選擇收入分類' : 'Select revenue category') : (language === 'zh' ? '選擇支出分類' : 'Select expense category')}</option>
-                        {filteredCategories.map(cat => (
-                          <option key={cat.id} value={cat.id}>{cat.name}</option>
-                        ))}
-                      </select>
+                        <span className={item.categoryId ? '' : 'text-slate-400 dark:text-slate-500'}>
+                          {item.categoryId
+                            ? (filteredCategories.find(c => c.id === item.categoryId)?.name ?? item.categoryId)
+                            : (isRevenue ? (language === 'zh' ? '選擇服務項目' : 'Select service') : (language === 'zh' ? '選擇支出分類' : 'Select expense category'))}
+                        </span>
+                        <i className="fas fa-chevron-right text-slate-300 dark:text-slate-600 text-xs"></i>
+                      </button>
                       <div className="relative">
                         <span className="absolute left-4 top-3.5 text-slate-400 dark:text-slate-500 font-bold">¥</span>
                         <input
@@ -1059,6 +1093,14 @@ const TransactionForm: React.FC<TransactionFormProps> = ({ onAdd, language, tran
                 ))}
                 {validationIssue?.field === 'serviceItems' && (
                   <p className="text-[11px] font-bold text-rose-600 dark:text-rose-400">{validationIssue.message}</p>
+                )}
+                {isServicePickerOpen && (
+                  <ServiceItemPicker
+                    categories={filteredCategories}
+                    language={language}
+                    onSelect={handlePickerSelect}
+                    onClose={() => { setIsServicePickerOpen(false); setPickerTargetItemId(null); }}
+                  />
                 )}
                 <div className="rounded-2xl bg-slate-100 dark:bg-white/5 px-4 py-3 flex items-center justify-between">
                   <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 dark:text-slate-400">{language === 'zh' ? '合計' : 'Total'}</span>
