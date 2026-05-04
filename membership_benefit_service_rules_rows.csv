@@ -1,0 +1,3 @@
+id,category_id,benefit_type,coupon_code_template,discount_mode,discount_value,is_active,notes,created_at,updated_at
+HZMB_Shuttle_discount_coupon,rev-50,hzmb_shuttle,HZMB_Shuttle_discount,full_line,120,TRUE,HZMB shuttle uses shuttle coupon,2026-05-04 01:01:46.096075+00,2026-05-04 01:07:03.36775+00
+LOMBART_car_care_upgrade_coupon,rev-21,car_care_upgrade,LOMBART_car_care_upgrade,full_line,100,TRUE,LOMBART upgrade coupon,2026-05-04 01:01:46.096075+01,2026-05-04 01:07:03.36775+01

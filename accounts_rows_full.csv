@@ -1,0 +1,10 @@
+id,name,type,created_at
+Alipay,Alipay Account,alipay,2026-05-03 00:00:00+00
+Bank,Bank Account,company_bank,2026-05-03 00:00:00+00
+Cash,Cash Register,cash,2026-05-03 00:00:00+00
+FPS,FPS Account,other,2026-05-03 00:00:00+00
+MPay,MPay Account,other,2026-05-03 00:00:00+00
+Payme,PayMe Account,other,2026-05-03 00:00:00+00
+User 1,User 1 Account,partner_personal,2026-05-03 00:00:00+00
+User 2,User 2 Account,partner_personal,2026-05-03 00:00:00+00
+Wechat,Wechat Account,wechat,2026-05-03 00:00:00+00

@@ -609,7 +609,7 @@ create table if not exists public.employee_page_permissions (
     check (page_key in (
       'overview', 'transactions', 'input', 'startup', 'balance',
       'settings', 'audit', 'notes', 'customers', 'vehicles',
-      'checkout', 'categories', 'accounts', 'memberships', 'charging', 'appointments'
+      'checkout', 'locker_deposit', 'locker_pickup', 'categories', 'accounts', 'memberships', 'charging', 'appointments'
     ))
 );
 

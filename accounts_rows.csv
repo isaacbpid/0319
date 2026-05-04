@@ -1,0 +1,7 @@
+id,name,type,created_at
+Alipay,Alipay Account,alipay,2026-03-22 00:57:41.175502+00
+Bank,Bank Account,company_bank,2026-03-19 02:59:52.016088+00
+Cash,Cash Register,cash,2026-03-19 02:58:50.445986+00
+User 1,User 1 Account,partner_personal,2026-03-19 03:10:50.796822+00
+User 2,User 2 Account,partner_personal,2026-03-19 03:12:03.484944+00
+Wechat,Wechat Account,wechat,2026-03-22 00:56:15.768786+00

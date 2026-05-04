@@ -49,13 +49,12 @@ insert into customer_memberships (
   id,
   customer_id,
   tier_id,
-  discount_rate_snapshot,
+  discounted_rate_snapshot,
   discount_eligible_car_limit_snapshot,
   priority_level_snapshot,
   exclusive_events_snapshot,
   status_points_snapshot,
   birthday_gift_snapshot,
-  discounted_rate_snapshot,
   linked_license_plates_snapshot,
   complimentary_car_care_upgrade_snapshot,
   priority_wash_snapshot,
@@ -97,22 +96,16 @@ begin
   from membership_tiers
   where id = 'tier_plus';
 
-  if m.discount_rate_snapshot <> coalesce(t.discounted_rate, t.discount_rate, 0) then
-    raise exception 'discount_rate_snapshot mismatch: membership=%, tier=%',
-      m.discount_rate_snapshot,
-      coalesce(t.discounted_rate, t.discount_rate, 0);
-  end if;
-
   if m.discount_eligible_car_limit_snapshot <> coalesce(t.linked_license_plates, t.discount_eligible_car_limit, 0) then
     raise exception 'discount_eligible_car_limit_snapshot mismatch: membership=%, tier=%',
       m.discount_eligible_car_limit_snapshot,
       coalesce(t.linked_license_plates, t.discount_eligible_car_limit, 0);
   end if;
 
-  if m.discounted_rate_snapshot <> coalesce(t.discounted_rate, t.discount_rate, 0) then
+  if m.discounted_rate_snapshot <> coalesce(t.discounted_rate, 0) then
     raise exception 'discounted_rate_snapshot mismatch: membership=%, tier=%',
       m.discounted_rate_snapshot,
-      coalesce(t.discounted_rate, t.discount_rate, 0);
+      coalesce(t.discounted_rate, 0);
   end if;
 
   if m.linked_license_plates_snapshot <> coalesce(t.linked_license_plates, t.discount_eligible_car_limit, 0) then
@@ -130,7 +123,7 @@ begin
   if m.exclusive_invitation_snapshot is distinct from coalesce(t.exclusive_invitation, t.exclusive_events, false) then
     raise exception 'exclusive_invitation_snapshot mismatch: membership=%, tier=%',
       m.exclusive_invitation_snapshot,
-      coalesce(t.exclusive_invitation, t.exclusive_events, false);
+      t.exclusive_events;
   end if;
 
   raise notice 'PASS: membership snapshots auto-populated from tier_plus';
@@ -183,7 +176,7 @@ begin
       id,
       customer_id,
       tier_id,
-      discount_rate_snapshot,
+      discounted_rate_snapshot,
       discount_eligible_car_limit_snapshot,
       priority_level_snapshot,
       exclusive_events_snapshot,

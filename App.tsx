@@ -1,8 +1,8 @@
  
-import React, { useState, useEffect, useMemo, useRef, Component, ErrorInfo, ReactNode } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, Component, ErrorInfo, ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Html5Qrcode } from 'html5-qrcode';
-import { Note, Transaction, TransactionType, Category, Owner, FinancialSummary, CloudConfig, AuditAction, AuditLog, CategoryItem, Customer, CustomerGroup, Vehicle, Account, CurrencyExchangeRate, DiscountItem, TransactionItem, CheckoutOrder, MembershipTier, CustomerMembership, PaymentCurrency, PaymentMethod, EmployeePageKey, EmployeePagePermission, EmployeeUser, UserRole, ChargingRateConfig, ChargingSession, Appointment, CheckoutOrderStatus, CheckoutOrderLine } from './types';
+import { Note, Transaction, TransactionType, Category, Owner, FinancialSummary, CloudConfig, AuditAction, AuditLog, CategoryItem, Customer, CustomerGroup, Vehicle, Account, AccountType, CurrencyExchangeRate, DiscountItem, TransactionItem, CheckoutOrder, MembershipTier, CustomerMembership, PaymentCurrency, PaymentMethod, EmployeePageKey, EmployeePagePermission, EmployeeUser, UserRole, ChargingRateConfig, ChargingSession, Appointment, CheckoutOrderStatus, CheckoutOrderLine } from './types';
 import Dashboard from './components/Dashboard';
 import TransactionList from './components/TransactionList';
 import TransactionForm from './components/TransactionForm';
@@ -21,8 +21,10 @@ import CategoriesPage from './components/CategoriesPage';
 import MembershipsPage from './components/MembershipsPage';
 import ChargingPage from './components/ChargingPage';
 import AppointmentsPage from './components/AppointmentsPage';
+import LockerDepositPage from './components/LockerDepositPage';
+import LockerPickupPage from './components/LockerPickupPage';
 import LoadingScreen from './components/LoadingScreen';
-import { initSupabase, syncRemoteTransactions, deleteRemoteTransaction, subscribeToTransactions, logAuditEvent, fetchAuditLogs, fetchTransactions, fetchRemoteNotes, syncRemoteNotes, deleteRemoteNote, subscribeToNotes, clearAllRemoteData, fetchRemoteCategories, syncRemoteCategories, deleteRemoteCategory, subscribeToCategories, fetchRemoteCustomers, syncRemoteCustomers, deleteRemoteCustomer, subscribeToCustomers, fetchRemoteCustomerGroups, syncRemoteCustomerGroups, deleteRemoteCustomerGroup, subscribeToCustomerGroups, fetchRemoteVehicles, syncRemoteVehicles, deleteRemoteVehicle, subscribeToVehicles, updateAdminSession, clearAdminSession, getServerTime, fetchRemoteAccounts, syncRemoteAccounts, deleteRemoteAccount, subscribeToAccounts, fetchRemoteDiscounts, syncRemoteDiscounts, subscribeToDiscounts, fetchRemoteCheckoutOrders, syncRemoteCheckoutOrders, deleteRemoteCheckoutOrder, subscribeToCheckoutOrders, fetchRemoteExchangeRates, fetchRemoteMembershipTiers, syncRemoteMembershipTiers, fetchRemoteCustomerMemberships, syncRemoteCustomerMemberships, subscribeToMembershipTiers, subscribeToCustomerMemberships, fetchEmployeeUsers, fetchEmployeePagePermissions, saveEmployeeUser, saveEmployeePagePermissions, DEFAULT_EMPLOYEE_PAGE_KEYS, fetchRemoteChargingRates, syncRemoteChargingRates, subscribeToChargingRates, fetchRemoteChargingSessions, syncRemoteChargingSessions, subscribeToChargingSessions, fetchRemoteAppointments, syncRemoteAppointments, subscribeToAppointments } from './services/database';
+import { initSupabase, syncRemoteTransactions, deleteRemoteTransaction, subscribeToTransactions, logAuditEvent, fetchAuditLogs, fetchTransactions, fetchRemoteNotes, syncRemoteNotes, deleteRemoteNote, subscribeToNotes, clearAllRemoteData, fetchRemoteCategories, syncRemoteCategories, deleteRemoteCategory, subscribeToCategories, fetchRemoteCustomers, syncRemoteCustomers, deleteRemoteCustomer, subscribeToCustomers, fetchRemoteCustomerGroups, syncRemoteCustomerGroups, deleteRemoteCustomerGroup, subscribeToCustomerGroups, fetchRemoteVehicles, syncRemoteVehicles, deleteRemoteVehicle, subscribeToVehicles, updateAdminSession, clearAdminSession, getServerTime, fetchRemoteAccounts, syncRemoteAccounts, deleteRemoteAccount, subscribeToAccounts, fetchRemoteDiscounts, syncRemoteDiscounts, subscribeToDiscounts, fetchRemoteCheckoutOrders, syncRemoteCheckoutOrders, deleteRemoteCheckoutOrder, subscribeToCheckoutOrders, fetchRemoteExchangeRates, fetchRemoteMembershipTiers, syncRemoteMembershipTiers, fetchRemoteCustomerMemberships, syncRemoteCustomerMemberships, subscribeToMembershipTiers, subscribeToCustomerMemberships, fetchEmployeeUsers, fetchEmployeePagePermissions, saveEmployeeUser, saveEmployeePagePermissions, DEFAULT_EMPLOYEE_PAGE_KEYS, fetchRemoteChargingRates, syncRemoteChargingRates, subscribeToChargingRates, fetchRemoteChargingSessions, syncRemoteChargingSessions, subscribeToChargingSessions, fetchRemoteAppointments, syncRemoteAppointments, subscribeToAppointments, redeemPointsForCheckout, createCheckoutPaymentSplit, deleteCheckoutPaymentSplit, getMembershipPrepaidBalance } from './services/database';
 import { translations } from './translations';
 import { LoginPage } from './components/LoginPage';
 import { convertCurrencyAmount, getApplicableExchangeRate } from './utils/currencyConversion';
@@ -51,6 +53,8 @@ const ALL_APP_TABS: AppTab[] = [
   'checkout',
   'completed_checkout',
   'service_lifecycle',
+  'locker_deposit',
+  'locker_pickup',
   'categories',
   'accounts',
   'memberships',
@@ -100,9 +104,50 @@ const getForcedCurrencyForPaymentMethod = (method: PaymentMethod): PaymentCurren
   return null;
 };
 
+const REQUIRED_PAYMENT_ACCOUNTS: Array<Pick<Account, 'id' | 'name' | 'type'>> = [
+  { id: 'Bank', name: 'Bank Account', type: AccountType.COMPANY_BANK },
+  { id: 'Cash', name: 'Cash Register', type: AccountType.CASH },
+  { id: 'Alipay', name: 'Alipay Account', type: AccountType.ALIPAY },
+  { id: 'Wechat', name: 'Wechat Account', type: AccountType.WECHAT },
+  { id: 'FPS', name: 'FPS Account', type: AccountType.OTHER },
+  { id: 'Payme', name: 'PayMe Account', type: AccountType.OTHER },
+  { id: 'MPay', name: 'MPay Account', type: AccountType.OTHER },
+  { id: 'User 1', name: 'User 1 Account', type: AccountType.PARTNER_PERSONAL },
+  { id: 'User 2', name: 'User 2 Account', type: AccountType.PARTNER_PERSONAL },
+];
+
+const mergeRequiredAccounts = (existingAccounts: Account[]): { merged: Account[]; added: number } => {
+  const byId = new Map(existingAccounts.map(account => [account.id, account]));
+  let added = 0;
+
+  for (const required of REQUIRED_PAYMENT_ACCOUNTS) {
+    if (byId.has(required.id)) continue;
+    byId.set(required.id, {
+      ...required,
+      createdAt: new Date().toISOString(),
+    });
+    added += 1;
+  }
+
+  return {
+    merged: Array.from(byId.values()),
+    added,
+  };
+};
+
+const getAccountIdForPaymentMethod = (paymentMethod: PaymentMethod): string | undefined => {
+  if (paymentMethod === PaymentMethod.FPS) return 'FPS';
+  if (paymentMethod === PaymentMethod.PAYME) return 'Payme';
+  if (paymentMethod === PaymentMethod.ALIPAY) return 'Alipay';
+  if (paymentMethod === PaymentMethod.WECHAT) return 'Wechat';
+  if (paymentMethod === PaymentMethod.MPAY) return 'MPay';
+  if (paymentMethod === PaymentMethod.HKD_CASH || paymentMethod === PaymentMethod.RMB_CASH || paymentMethod === PaymentMethod.MOP_CASH) return 'Cash';
+  return undefined;
+};
+
 const buildTransactionItemsFromCheckoutOrder = (order: CheckoutOrder): TransactionItem[] => {
   const serviceLines = (order.lines || []).filter(line => !line.isDiscount && Number(line.lineSubtotal) > 0);
-  const grossServiceTotal = serviceLines.reduce((sum, line) => sum + Number(line.lineSubtotal || 0), 0);
+  const discountLines = (order.lines || []).filter(line => line.isDiscount && Number(line.lineSubtotal) > 0);
   const targetNet = roundCurrency(Math.max(0, Number(order.netAmount || 0)));
 
   if (serviceLines.length === 0) {
@@ -116,7 +161,25 @@ const buildTransactionItemsFromCheckoutOrder = (order: CheckoutOrder): Transacti
     }];
   }
 
-  if (grossServiceTotal <= 0) {
+  // Apply line-level benefit discounts to their source service first.
+  const benefitDiscountByService = new Map<string, number>();
+  for (const discountLine of discountLines) {
+    const sourceServiceName = (discountLine.serviceNameSnapshot || '').trim();
+    if (!sourceServiceName) continue;
+    const current = benefitDiscountByService.get(sourceServiceName) || 0;
+    benefitDiscountByService.set(sourceServiceName, current + Math.max(0, Number(discountLine.lineSubtotal || 0)));
+  }
+
+  const serviceBases = serviceLines.map(line => {
+    const originalSubtotal = Math.max(0, Number(line.lineSubtotal || 0));
+    const benefitDeduction = Math.max(0, benefitDiscountByService.get((line.name || '').trim()) || 0);
+    const afterBenefit = roundCurrency(Math.max(0, originalSubtotal - benefitDeduction));
+    return { line, afterBenefit };
+  });
+
+  const postBenefitServiceTotal = serviceBases.reduce((sum, entry) => sum + entry.afterBenefit, 0);
+
+  if (postBenefitServiceTotal <= 0) {
     return serviceLines.map((line, index) => ({
       id: `${order.id}_item_${index + 1}`,
       transactionId: '',
@@ -127,15 +190,15 @@ const buildTransactionItemsFromCheckoutOrder = (order: CheckoutOrder): Transacti
     }));
   }
 
-  const factor = targetNet / grossServiceTotal;
+  // Remaining surcharges/discounts are spread across post-benefit service bases.
+  const factor = targetNet / postBenefitServiceTotal;
   let allocatedTotal = 0;
 
-  return serviceLines.map((line, index) => {
-    const isLast = index === serviceLines.length - 1;
-    const base = Number(line.lineSubtotal || 0);
+  return serviceBases.map(({ line, afterBenefit }, index) => {
+    const isLast = index === serviceBases.length - 1;
     const allocated = isLast
       ? roundCurrency(targetNet - allocatedTotal)
-      : roundCurrency(base * factor);
+      : roundCurrency(afterBenefit * factor);
 
     allocatedTotal = roundCurrency(allocatedTotal + allocated);
 
@@ -173,6 +236,7 @@ const buildTransactionFromPaidCheckoutOrder = (
     amount,
     description: `Checkout ${order.invoiceNumber || order.id.slice(0, 8)} (${paymentMethod} ${paymentCurrency})`,
     contributedBy: Owner.OWNER_A,
+    toAccountId: getAccountIdForPaymentMethod(paymentMethod),
     customerId: order.customerId,
     notes: order.notes,
     checkoutOrderId: order.id,
@@ -181,7 +245,9 @@ const buildTransactionFromPaidCheckoutOrder = (
     paymentCurrency,
     currency: PaymentCurrency.RMB,
     paymentAmount: order.paymentAmount,
-    splitMode: 'NONE',
+    splitMode: 'EQUAL',
+    splitRatioA: 0.5,
+    splitRatioB: 0.5,
     updatedAt: new Date().toISOString(),
   };
 };
@@ -768,7 +834,14 @@ const App: React.FC = () => {
       }
 
       if (cloudAccounts !== null && cloudAccounts !== undefined) {
-        setAccounts(cloudAccounts);
+        const { merged: mergedAccounts, added } = mergeRequiredAccounts(cloudAccounts);
+        if (added > 0) {
+          const accountSeedResult = await syncRemoteAccounts(mergedAccounts);
+          if (!accountSeedResult.success) {
+            console.warn('Failed to seed required accounts:', accountSeedResult.error);
+          }
+        }
+        setAccounts(mergedAccounts);
       }
 
       if (cloudDiscounts !== null && cloudDiscounts !== undefined) {
@@ -1820,6 +1893,157 @@ const App: React.FC = () => {
     }
   };
 
+  const markCheckoutOrderPaidWithPoints = async (orderId: string): Promise<{ error?: string }> => {
+    if (!ensureCloudWritable()) return { error: 'Cloud not writable' };
+
+    const order = checkoutOrders.find(item => item.id === orderId);
+    if (!order) return { error: 'Order not found' };
+    if (order.status !== 'checked_out') return { error: 'Order is not in checked_out state' };
+
+    const activeMembership = customerMemberships
+      .filter(m => m.isActive && m.customerId === order.customerId)
+      .sort((a, b) => new Date(b.startAt || b.createdAt).getTime() - new Date(a.startAt || a.createdAt).getTime())[0];
+
+    if (!activeMembership) return { error: 'No active membership found for this customer' };
+    if (activeMembership.statusPoints < order.netAmount) {
+      return { error: `Insufficient points: have ${activeMembership.statusPoints}, need ${order.netAmount}` };
+    }
+
+    const redeemResult = await redeemPointsForCheckout(
+      activeMembership.id,
+      orderId,
+      Math.round(order.netAmount),
+      activeMembership.statusPoints,
+      activeMembership.customerId
+    );
+    if (!redeemResult.success) return { error: redeemResult.error };
+
+    const now = new Date().toISOString();
+    const paidOrder: CheckoutOrder = {
+      ...order,
+      paymentStatus: 'paid',
+      paymentMethod: PaymentMethod.POINTS,
+      paymentCurrency: PaymentCurrency.RMB,
+      paidAt: now,
+      currency: PaymentCurrency.RMB,
+      paymentAmount: order.netAmount,
+      appliedRate: 1,
+      updatedAt: now,
+    };
+
+    setIsSyncing(true);
+    try {
+      setSyncStatus('syncing');
+      const paymentResult = await syncRemoteCheckoutOrders([paidOrder]);
+      if (!paymentResult.success) {
+        setLastError(paymentResult.error || 'Failed to save checkout payment state');
+        setSyncStatus('error');
+        return { error: paymentResult.error };
+      }
+      setCheckoutOrders(prev => prev.map(item => item.id === orderId ? paidOrder : item));
+      // Update local membership points balance
+      setCustomerMemberships(prev =>
+        prev.map(m => m.id === activeMembership.id
+          ? { ...m, statusPoints: activeMembership.statusPoints - Math.round(order.netAmount), updatedAt: now }
+          : m
+        )
+      );
+      setSyncStatus('cloud');
+      setLastSync(new Date());
+      logAuditEvent(AuditAction.UPDATE, 'checkout_sales', orderId, undefined, order, paidOrder);
+      await loadData(false);
+      return {};
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const markCheckoutOrderPaidWithPrepaid = async (orderId: string): Promise<{ error?: string }> => {
+    if (!ensureCloudWritable()) return { error: 'Cloud not writable' };
+
+    const order = checkoutOrders.find(item => item.id === orderId);
+    if (!order) return { error: 'Order not found' };
+    if (order.status !== 'checked_out') return { error: 'Order is not in checked_out state' };
+
+    const activeMembership = customerMemberships
+      .filter(m => m.isActive && m.customerId === order.customerId)
+      .sort((a, b) => new Date(b.startAt || b.createdAt).getTime() - new Date(a.startAt || a.createdAt).getTime())[0];
+
+    if (!activeMembership) return { error: 'No active membership found for this customer' };
+
+    const { balance, error: balanceError } = await getMembershipPrepaidBalance(activeMembership.id);
+    if (balanceError) return { error: balanceError };
+    if (balance == null || balance < order.netAmount) {
+      return { error: `Insufficient prepaid balance: have ${balance ?? 0}, need ${order.netAmount}` };
+    }
+
+    const splitResult = await createCheckoutPaymentSplit({
+      checkoutId: orderId,
+      paymentSource: 'prepaid',
+      amountPaid: order.netAmount,
+      membershipId: activeMembership.id,
+      notes: `Prepaid payment for checkout ${order.invoiceNumber || orderId.slice(0, 8)}`,
+    });
+    if (!splitResult.success) return { error: splitResult.error };
+
+    const now = new Date().toISOString();
+    const paidOrder: CheckoutOrder = {
+      ...order,
+      paymentStatus: 'paid',
+      paymentMethod: PaymentMethod.PREPAID,
+      paymentCurrency: PaymentCurrency.RMB,
+      paidAt: now,
+      currency: PaymentCurrency.RMB,
+      paymentAmount: order.netAmount,
+      appliedRate: 1,
+      updatedAt: now,
+    };
+
+    const transaction = buildTransactionFromPaidCheckoutOrder(paidOrder, PaymentMethod.PREPAID, PaymentCurrency.RMB);
+
+    setIsSyncing(true);
+    try {
+      setSyncStatus('syncing');
+      const paymentResult = await syncRemoteCheckoutOrders([paidOrder]);
+      if (!paymentResult.success) {
+        if (splitResult.id) {
+          await deleteCheckoutPaymentSplit(splitResult.id);
+        }
+        setLastError(paymentResult.error || 'Failed to save checkout payment state');
+        setSyncStatus('error');
+        return { error: paymentResult.error };
+      }
+
+      const transactionResult = await syncRemoteTransactions([transaction]);
+      if (!transactionResult.success) {
+        await syncRemoteCheckoutOrders([order]);
+        if (splitResult.id) {
+          await deleteCheckoutPaymentSplit(splitResult.id);
+        }
+        const errorMessage = formatTransactionSyncError(transactionResult, 'Failed to post prepaid checkout transaction');
+        setLastError(errorMessage);
+        setSyncStatus('error');
+        return { error: errorMessage };
+      }
+
+      const linkedOrder: CheckoutOrder = {
+        ...paidOrder,
+        linkedTransactionId: transaction.id,
+        updatedAt: new Date().toISOString(),
+      };
+      await syncRemoteCheckoutOrders([linkedOrder]);
+
+      setCheckoutOrders(prev => prev.map(item => item.id === orderId ? linkedOrder : item));
+      setSyncStatus('cloud');
+      setLastSync(new Date());
+      logAuditEvent(AuditAction.CREATE, 'transactions', transaction.id, undefined, undefined, transaction);
+      await loadData(false);
+      return {};
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   const saveMembershipTiers = async (updatedTiers: MembershipTier[]) => {
     if (!ensureCloudWritable()) return;
     setIsSyncing(true);
@@ -1853,6 +2077,96 @@ const App: React.FC = () => {
         setLastError(result.error || 'Customer memberships sync failed');
         setSyncStatus('error');
       }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const assignMembershipWithPayment = async (input: {
+    memberships: CustomerMembership[];
+    customerId: string;
+    membershipId: string;
+    membershipNo?: string;
+    tierName?: string;
+    prepaidAmount: number;
+    paymentMethod: PaymentMethod;
+    paymentCurrency: PaymentCurrency;
+  }): Promise<{ error?: string }> => {
+    if (!ensureCloudWritable()) return { error: 'Cloud not writable' };
+
+    const prepaidAmount = Math.max(0, Number(input.prepaidAmount) || 0);
+    setIsSyncing(true);
+
+    try {
+      setSyncStatus('syncing');
+      const membershipResult = await syncRemoteCustomerMemberships(input.memberships);
+      if (!membershipResult.success) {
+        const errorMessage = membershipResult.error || 'Customer memberships sync failed';
+        setLastError(errorMessage);
+        setSyncStatus('error');
+        return { error: errorMessage };
+      }
+
+      if (prepaidAmount > 0) {
+        const now = new Date().toISOString();
+        const categoryId = Category.OTHER;
+        const itemName = language === 'zh' ? '會員預付金' : 'Membership Prepaid';
+        const description = language === 'zh'
+          ? `會員預付金收款（${input.paymentMethod} ${input.paymentCurrency}）`
+          : `Membership prepaid payment (${input.paymentMethod} ${input.paymentCurrency})`;
+        const transactionId = `membership_prepaid_${input.membershipId}_${Date.now()}`;
+
+        const transaction: Transaction = {
+          id: transactionId,
+          receiptNumber: input.membershipNo ? `MP-${input.membershipNo}` : `MP-${Date.now().toString().slice(-8)}`,
+          date: now.slice(0, 10),
+          type: TransactionType.REVENUE,
+          items: [{
+            id: `${transactionId}_item_1`,
+            transactionId,
+            categoryId,
+            name: itemName,
+            price: prepaidAmount,
+            notes: input.tierName ? `Tier: ${input.tierName}` : undefined,
+          }],
+          categoryId,
+          amount: prepaidAmount,
+          description,
+          contributedBy: Owner.OWNER_A,
+          toAccountId: getAccountIdForPaymentMethod(input.paymentMethod),
+          customerId: input.customerId,
+          paymentStatus: 'paid',
+          paymentMethod: input.paymentMethod,
+          paymentCurrency: input.paymentCurrency,
+          currency: PaymentCurrency.RMB,
+          paymentAmount: prepaidAmount,
+          splitMode: 'EQUAL',
+          splitRatioA: 0.5,
+          splitRatioB: 0.5,
+          notes: [
+            input.membershipNo ? `Membership No: ${input.membershipNo}` : '',
+            input.tierName ? `Tier: ${input.tierName}` : '',
+          ].filter(Boolean).join(' | ') || undefined,
+          updatedAt: now,
+        };
+
+        const transactionResult = await syncRemoteTransactions([transaction]);
+        if (!transactionResult.success) {
+          const errorMessage = formatTransactionSyncError(transactionResult, 'Membership saved but prepaid transaction failed');
+          setLastError(errorMessage);
+          setSyncStatus('error');
+          await loadData(false);
+          return { error: errorMessage };
+        }
+
+        logAuditEvent(AuditAction.CREATE, 'transactions', transaction.id, undefined, undefined, transaction);
+      }
+
+      setCustomerMemberships(input.memberships);
+      setSyncStatus('cloud');
+      setLastSync(new Date());
+      await loadData(false);
+      return {};
     } finally {
       setIsSyncing(false);
     }
@@ -2364,6 +2678,14 @@ const App: React.FC = () => {
             <i className="fas fa-car-side w-5"></i>
             <span>{language === 'zh' ? '服務進度' : 'Service Life Cycle'}</span>
           </button>}
+          {canAccessTab('locker_deposit') && <button onClick={() => setActiveTab('locker_deposit')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'locker_deposit' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+            <i className="fas fa-box-open w-5"></i>
+            <span>{language === 'zh' ? 'Locker 存放' : 'Locker Deposit'}</span>
+          </button>}
+          {canAccessTab('locker_pickup') && <button onClick={() => setActiveTab('locker_pickup')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'locker_pickup' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
+            <i className="fas fa-box w-5"></i>
+            <span>{language === 'zh' ? 'Locker 取件' : 'Locker Pickup'}</span>
+          </button>}
           {canAccessTab('charging') && <button onClick={() => setActiveTab('charging')} className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-200 ${activeTab === 'charging' ? 'bg-blue-50 text-blue-600 dark:bg-blue-600/10 dark:text-blue-400 font-bold' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-white/5'}`}>
             <i className="fas fa-bolt w-5"></i>
             <span>{language === 'zh' ? '充電服務' : 'Charging Service'}</span>
@@ -2474,6 +2796,8 @@ const App: React.FC = () => {
                   activeTab === 'memberships' ? (language === 'zh' ? '會員方案' : 'Memberships') : 
                   activeTab === 'categories' ? (language === 'zh' ? '服務類別' : 'Categories') : 
                   activeTab === 'service_lifecycle' ? (language === 'zh' ? '服務進度' : 'Service Life Cycle') : 
+                  activeTab === 'locker_deposit' ? (language === 'zh' ? 'Locker 存放' : 'Locker Deposit') : 
+                  activeTab === 'locker_pickup' ? (language === 'zh' ? 'Locker 取件' : 'Locker Pickup') : 
                   activeTab === 'completed_checkout' ? (language === 'zh' ? '已完成訂單' : 'Completed Checkout') : 
                   (t[activeTab as keyof typeof t] || activeTab)
                 )}
@@ -2530,6 +2854,8 @@ const App: React.FC = () => {
               { id: 'checkout', icon: 'fa-shopping-cart', label: language === 'zh' ? '新銷售' : 'New Sale' },
               { id: 'completed_checkout', icon: 'fa-clipboard-check', label: language === 'zh' ? '已完成訂單' : 'Completed Checkout' },
               { id: 'service_lifecycle', icon: 'fa-car-side', label: language === 'zh' ? '服務進度' : 'Service Life Cycle' },
+              { id: 'locker_deposit', icon: 'fa-box-open', label: language === 'zh' ? 'Locker 存放' : 'Locker Deposit' },
+              { id: 'locker_pickup', icon: 'fa-box', label: language === 'zh' ? 'Locker 取件' : 'Locker Pickup' },
               { id: 'charging', icon: 'fa-bolt', label: language === 'zh' ? '充電服務' : 'Charging Service' },
               { id: 'appointments', icon: 'fa-calendar-alt', label: language === 'zh' ? '預約管理' : 'Appointments' },
               { id: 'transactions', icon: 'fa-chart-bar', label: language === 'zh' ? '報表' : 'Reports' },
@@ -2874,10 +3200,13 @@ const App: React.FC = () => {
                   customers={customers}
                   vehicles={vehicles}
                   customerMemberships={customerMemberships}
+                  membershipTiers={membershipTiers}
                   discounts={discounts}
                   checkoutOrders={checkoutOrders}
                   exchangeRates={exchangeRates}
                   onMarkOrderPaid={markCheckoutOrderPaid}
+                  onMarkOrderPaidWithPoints={markCheckoutOrderPaidWithPoints}
+                  onMarkOrderPaidWithPrepaid={markCheckoutOrderPaidWithPrepaid}
                   onDeleteOrder={handleDeleteCheckoutOrder}
                   initialOpenOrderId={pendingCompletedCheckoutOpenId}
                   onInitialOpenOrderHandled={() => setPendingCompletedCheckoutOpenId(null)}
@@ -2893,6 +3222,20 @@ const App: React.FC = () => {
                   onSaveOrders={saveCheckoutOrders}
                   initialOpenOrderId={pendingServiceLifecycleOpenId}
                   onInitialOpenOrderHandled={() => setPendingServiceLifecycleOpenId(null)}
+                  isReadOnly={isReadOnly}
+                />
+              )}
+              {activeTab === 'locker_deposit' && (
+                <LockerDepositPage
+                  language={language}
+                  vehicles={vehicles}
+                  checkoutOrders={checkoutOrders}
+                  isReadOnly={isReadOnly}
+                />
+              )}
+              {activeTab === 'locker_pickup' && (
+                <LockerPickupPage
+                  language={language}
                   isReadOnly={isReadOnly}
                 />
               )}
@@ -2951,6 +3294,7 @@ const App: React.FC = () => {
                   vehicles={vehicles}
                   transactions={transactions}
                   categories={categories}
+                  customerMemberships={customerMemberships}
                   onBack={() => setActiveTab('overview')}
                   onSaveCustomer={handleSaveCustomer}
                   onDeleteCustomer={handleDeleteCustomer}
@@ -3011,10 +3355,12 @@ const App: React.FC = () => {
                 <MembershipsPage
                   language={language}
                   customers={customers}
+                  vehicles={vehicles}
                   membershipTiers={membershipTiers}
                   customerMemberships={customerMemberships}
                   onSaveMembershipTiers={saveMembershipTiers}
                   onSaveCustomerMemberships={saveCustomerMemberships}
+                  onAssignMembershipWithPayment={assignMembershipWithPayment}
                   isReadOnly={isReadOnly}
                 />
               )}

@@ -9,13 +9,19 @@ import {
   Customer,
   CustomerMembership,
   DiscountItem,
+  MembershipBenefitType,
+  MembershipBenefitServiceRule,
   TransactionType,
   Vehicle,
   VehicleSize,
 } from '../types';
-import { findCustomerVehicleByLicensePlate } from '../services/database';
 import {
-  calculateCouponDiscountAmount,
+  fetchMembershipBenefitServiceRules,
+  findCustomerVehicleByLicensePlate,
+  getMembershipBenefitRemaining,
+  redeemMembershipBenefit,
+} from '../services/database';
+import {
   calculateEstimatedDurationMinutes,
   calculateEstimatedFinishAt,
   calculateGrossAmount,
@@ -111,6 +117,9 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
   const [expandedServiceGroup, setExpandedServiceGroup] = useState<string | null>(null);
   const [detailService, setDetailService] = useState<CategoryItem | null>(null);
   const [draftSearchTerm, setDraftSearchTerm] = useState('');
+  const [lineBenefits, setLineBenefits] = useState<Record<string, MembershipBenefitType>>({});
+  const [benefitRemaining, setBenefitRemaining] = useState<Record<MembershipBenefitType, number>>({ car_care_upgrade: 0, hzmb_shuttle: 0 });
+  const [benefitRulesByKey, setBenefitRulesByKey] = useState<Record<string, MembershipBenefitServiceRule>>({});
 
   const activeServices = useMemo(() => {
     return categories
@@ -147,13 +156,49 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
     return map;
   }, [customerMemberships]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchMembershipBenefitServiceRules().then(result => {
+      if (cancelled || !result.data) return;
+      const map: Record<string, MembershipBenefitServiceRule> = {};
+      for (const rule of result.data) {
+        map[`${rule.categoryId}::${rule.benefitType}`] = rule;
+      }
+      setBenefitRulesByKey(map);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Load live remaining counts whenever the selected customer (and their membership) changes.
+  useEffect(() => {
+    const membership = selectedCustomerId ? activeMembershipByCustomerId.get(selectedCustomerId) : undefined;
+    if (!membership) {
+      setBenefitRemaining({ car_care_upgrade: 0, hzmb_shuttle: 0 });
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      getMembershipBenefitRemaining(membership.id, 'car_care_upgrade'),
+      getMembershipBenefitRemaining(membership.id, 'hzmb_shuttle'),
+    ]).then(([carCare, hzmb]) => {
+      if (!cancelled) {
+        setBenefitRemaining({
+          car_care_upgrade: carCare.remaining ?? 0,
+          hzmb_shuttle: hzmb.remaining ?? 0,
+        });
+      }
+    });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCustomerId, activeMembershipByCustomerId]);
+
   const getMembershipDiscountRateForCustomer = (customerId?: string): number => {
     if (!customerId) return 0;
     const membership = activeMembershipByCustomerId.get(customerId);
     if (!membership) return 0;
-    const rate = Number.isFinite(membership.discountedRateSnapshot)
-      ? membership.discountedRateSnapshot
-      : membership.discountRateSnapshot;
+    const rate = membership.discountedRateSnapshot;
     return Math.max(0, Math.min(100, Number(rate || 0)));
   };
 
@@ -248,6 +293,77 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
     return Number(Math.max(0, item.amount).toFixed(2));
   };
 
+  const getBenefitDiscountAmountForLine = (line: CheckoutOrderLine, benefitType: MembershipBenefitType): number => {
+    const lineSubtotal = Math.max(0, Number(line.lineSubtotal || 0));
+    if (lineSubtotal <= 0) return 0;
+
+    const categoryId = line.categoryId || '';
+    const rule = categoryId ? benefitRulesByKey[`${categoryId}::${benefitType}`] : undefined;
+
+    // Prefer discount table amount when coupon code is mapped; otherwise use rule mode/value.
+    if (rule?.couponCodeTemplate) {
+      const discountByCode = resolveDiscountByCode(rule.couponCodeTemplate, 'discount');
+      if (discountByCode) {
+        const amount = discountByCode.amountType === 'percent'
+          ? (lineSubtotal * Math.max(0, discountByCode.amount)) / 100
+          : Math.max(0, discountByCode.amount);
+        return Number(Math.min(lineSubtotal, amount).toFixed(2));
+      }
+    }
+
+    if (!rule) {
+      return 0;
+    }
+
+    if (rule.discountMode === 'percent') {
+      const amount = (lineSubtotal * Math.max(0, rule.discountValue)) / 100;
+      return Number(Math.min(lineSubtotal, amount).toFixed(2));
+    }
+
+    if (rule.discountMode === 'fixed_amount') {
+      return Number(Math.min(lineSubtotal, Math.max(0, rule.discountValue)).toFixed(2));
+    }
+
+    return Number(Math.min(lineSubtotal, Math.max(0, rule.discountValue)).toFixed(2));
+  };
+
+  const getLineCouponEligibility = (line: CheckoutOrderLine): { allowsCarCareCoupon: boolean; allowsHzmbCoupon: boolean } => {
+    const categoryId = (line.categoryId || '').trim();
+    if (categoryId) {
+      return {
+        allowsCarCareCoupon: Boolean(benefitRulesByKey[`${categoryId}::car_care_upgrade`]),
+        allowsHzmbCoupon: Boolean(benefitRulesByKey[`${categoryId}::hzmb_shuttle`]),
+      };
+    }
+
+    // Fallback for legacy lines that may not carry categoryId.
+    const lineName = line.name || '';
+    const normalizedLineName = lineName.toLowerCase();
+    const isHzmbLine = normalizedLineName.includes('hzmb') || normalizedLineName.includes('shuttle') || lineName.includes('港珠澳');
+    const isCarCareLine =
+      normalizedLineName.includes('car care') ||
+      normalizedLineName.includes('carcare') ||
+      normalizedLineName.includes('upgrade') ||
+      normalizedLineName.includes('lombart') ||
+      lineName.includes('升級') ||
+      lineName.includes('护理') ||
+      lineName.includes('護理');
+    return {
+      allowsCarCareCoupon: !isHzmbLine,
+      allowsHzmbCoupon: !isCarCareLine,
+    };
+  };
+
+  const getUpgradeCouponName = (line: CheckoutOrderLine): string => {
+    const base = (line.name || 'SERVICE').trim().replace(/\s+/g, '_');
+    return `${base}_Upgrade_discount`;
+  };
+
+  const isBenefitEligibleForLine = (line: CheckoutOrderLine, benefitType: MembershipBenefitType): boolean => {
+    const eligibility = getLineCouponEligibility(line);
+    return benefitType === 'car_care_upgrade' ? eligibility.allowsCarCareCoupon : eligibility.allowsHzmbCoupon;
+  };
+
   const drafts = useMemo(() => {
     return checkoutOrders.filter(order => order.status === CheckoutOrderStatus.DRAFT);
   }, [checkoutOrders]);
@@ -275,32 +391,40 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
   const couponLineSubtotal = couponAmount > 0 ? couponAmount : 0;
   const resolvedDiscount = resolveDiscountByCode(discountCodeInput, 'discount');
   const resolvedSurcharge = resolveDiscountByCode(surchargeCodeInput, 'surcharge');
+  const selectedBenefitDiscountLines: CheckoutOrderLine[] = selectedLines
+    .filter(line => !line.isDiscount && Boolean(lineBenefits[line.id]) && isBenefitEligibleForLine(line, lineBenefits[line.id] as MembershipBenefitType))
+    .map(line => {
+      const benefitType = lineBenefits[line.id] as MembershipBenefitType;
+      const discountAmount = getBenefitDiscountAmountForLine(line, benefitType);
+      return {
+        id: `benefit-preview-${line.id}`,
+        saleId: 'preview',
+        name: benefitType === 'hzmb_shuttle'
+          ? (language === 'zh' ? '港珠澳優惠券折扣' : 'HZMB Coupon Discount')
+          : (language === 'zh' ? 'Car Care 升級券折扣' : 'Car Care Upgrade Coupon Discount'),
+        quantity: 1,
+        unitPrice: discountAmount,
+        lineSubtotal: discountAmount,
+        estimatedDurationMinutes: 0,
+        isDiscount: true,
+        createdAt: new Date().toISOString(),
+      };
+    })
+    .filter(line => line.lineSubtotal > 0);
 
   const grossAmount = calculateGrossAmount(selectedLines);
   const selectedVehicle = selectedVehicleId ? vehicleMap.get(selectedVehicleId) : undefined;
   const selectedVehicleIsLarge = isLargeVehicle(selectedVehicle);
+  // Benefit coupons discount specific items first; everything else is calculated on the post-benefit base
+  const benefitDiscountTotal = selectedBenefitDiscountLines.reduce((sum, l) => sum + (Number.isFinite(l.lineSubtotal) ? l.lineSubtotal : 0), 0);
+  const postBenefitGross = Math.max(0, grossAmount - benefitDiscountTotal);
   const largeVehicleSurchargeAmount = selectedVehicleIsLarge
-    ? calculateCodeAmount(grossAmount, resolvedSurcharge)
+    ? calculateCodeAmount(postBenefitGross, resolvedSurcharge)
     : 0;
-  const couponDiscountAmount = calculateCouponDiscountAmount([
-    ...selectedLines,
-    ...(couponLineSubtotal > 0
-      ? [{
-          id: 'coupon-preview',
-          saleId: 'preview',
-          name: language === 'zh' ? '優惠券折扣' : 'Coupon Discount',
-          quantity: 1,
-          unitPrice: couponLineSubtotal,
-          lineSubtotal: couponLineSubtotal,
-          estimatedDurationMinutes: 0,
-          isDiscount: true,
-          createdAt: new Date().toISOString(),
-        }]
-      : []),
-  ]);
-  const membershipDiscountAmount = calculateMembershipDiscountAmount(grossAmount, membershipRate);
-  const codeDiscountAmount = calculateCodeAmount(grossAmount, resolvedDiscount);
-  const netAmount = calculateNetAmount(grossAmount, largeVehicleSurchargeAmount, membershipDiscountAmount, couponDiscountAmount + codeDiscountAmount);
+  const couponDiscountAmount = couponLineSubtotal; // manual coupon only; benefit discounts are in benefitCouponLines
+  const membershipDiscountAmount = calculateMembershipDiscountAmount(postBenefitGross, membershipRate);
+  const codeDiscountAmount = calculateCodeAmount(postBenefitGross, resolvedDiscount);
+  const netAmount = calculateNetAmount(postBenefitGross, largeVehicleSurchargeAmount, membershipDiscountAmount, couponDiscountAmount + codeDiscountAmount);
   const estimatedDurationMinutes = calculateEstimatedDurationMinutes(selectedLines);
 
   useEffect(() => {
@@ -388,6 +512,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
     setSurchargeCodeInput('');
     setNotes('');
     setEditingOrderId(null);
+    setLineBenefits({});
   };
 
   const getCommitValidationMessage = (customerId?: string, vehicleId?: string): string | null => {
@@ -454,6 +579,22 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
 
   const removeLine = (lineId: string) => {
     setSelectedLines(prev => prev.filter(line => line.id !== lineId));
+    setLineBenefits(prev => { const next = { ...prev }; delete next[lineId]; return next; });
+  };
+
+  const toggleLineBenefit = (lineId: string, benefitType: MembershipBenefitType) => {
+    setLineBenefits(prev => {
+      const targetLine = selectedLines.find(line => line.id === lineId);
+      if (!targetLine || !isBenefitEligibleForLine(targetLine, benefitType)) {
+        return prev;
+      }
+      if (prev[lineId] === benefitType) {
+        const next = { ...prev };
+        delete next[lineId];
+        return next;
+      }
+      return { ...prev, [lineId]: benefitType };
+    });
   };
 
   const updateLineQuantity = (lineId: string, nextQuantity: number) => {
@@ -474,9 +615,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
   const loadOrderForEdit = (order: CheckoutOrder) => {
     const serviceLines = order.lines.filter(line => !line.isDiscount);
     const couponDiscount = order.couponDiscountAmount || 0;
-    const membershipRateGuess = order.grossAmount > 0
-      ? (order.membershipDiscountAmount / order.grossAmount) * 100
-      : 0;
+    const membershipRateGuess = getMembershipDiscountRateForCustomer(order.customerId || '');
 
     setEditingOrderId(order.id);
     setSelectedCustomerId(order.customerId || '');
@@ -590,13 +729,37 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
           updatedAt: now,
         }]
       : [];
+    const benefitCouponLines: CheckoutOrderLine[] = selectedLines
+      .filter(line => !line.isDiscount && Boolean(lineBenefits[line.id]) && isBenefitEligibleForLine(line, lineBenefits[line.id] as MembershipBenefitType))
+      .map(line => {
+        const benefitType = lineBenefits[line.id] as MembershipBenefitType;
+        const discountAmount = getBenefitDiscountAmountForLine(line, benefitType);
+        return {
+          id: crypto.randomUUID(),
+          saleId: id,
+          name: benefitType === 'hzmb_shuttle'
+            ? (language === 'zh' ? '港珠澳優惠券折扣' : 'HZMB Coupon Discount')
+            : (language === 'zh' ? 'Car Care 升級券折扣' : 'Car Care Upgrade Coupon Discount'),
+          quantity: 1,
+          unitPrice: discountAmount,
+          lineSubtotal: discountAmount,
+          estimatedDurationMinutes: 0,
+          serviceNameSnapshot: line.name,
+          isDiscount: true,
+          createdAt: now,
+          updatedAt: now,
+        };
+      })
+      .filter(line => line.lineSubtotal > 0);
 
     const lines = [
       ...selectedLines.map(line => ({
         ...line,
         saleId: id,
+        benefitType: lineBenefits[line.id],
         updatedAt: now,
       })),
+      ...benefitCouponLines,
       ...couponLine,
     ];
 
@@ -637,6 +800,28 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
         alert(validationMessage);
         return;
       }
+      // Validate benefit coupon entitlements before committing.
+      const membership = selectedCustomerId ? activeMembershipByCustomerId.get(selectedCustomerId) : undefined;
+      if (membership && Object.keys(lineBenefits).length > 0) {
+        const usedCounts: Partial<Record<MembershipBenefitType, number>> = {};
+        for (const [lineId, bt] of Object.entries(lineBenefits)) {
+          const line = selectedLines.find(item => item.id === lineId);
+          if (!line || !isBenefitEligibleForLine(line, bt as MembershipBenefitType)) continue;
+          usedCounts[bt as MembershipBenefitType] = (usedCounts[bt as MembershipBenefitType] ?? 0) + 1;
+        }
+        for (const [bt, count] of Object.entries(usedCounts) as [MembershipBenefitType, number][]) {
+          const available = benefitRemaining[bt] ?? 0;
+          if (count > available) {
+            const label = bt === 'car_care_upgrade'
+              ? (language === 'zh' ? 'Car Care 升級' : 'Car Care Upgrade')
+              : (language === 'zh' ? '港珠澳接送' : 'HZMB Shuttle');
+            alert(language === 'zh'
+              ? `${label} 優惠券餘量不足（剩餘 ${available}，本次使用 ${count}）`
+              : `Insufficient ${label} coupons (${available} remaining, ${count} applied)`);
+            return;
+          }
+        }
+      }
     }
 
     const order = buildOrder(status);
@@ -645,6 +830,25 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
       : [order, ...checkoutOrders];
 
     await onSaveOrders(nextOrders);
+
+    // Persist benefit redemptions after order is saved.
+    if (status === CheckoutOrderStatus.COMMITTED) {
+      const membership = selectedCustomerId ? activeMembershipByCustomerId.get(selectedCustomerId) : undefined;
+      if (membership) {
+        for (const [lineId, benefitType] of Object.entries(lineBenefits)) {
+          const line = selectedLines.find(item => item.id === lineId);
+          if (!line || !isBenefitEligibleForLine(line, benefitType as MembershipBenefitType)) continue;
+          await redeemMembershipBenefit({
+            membershipId: membership.id,
+            customerId: membership.customerId,
+            benefitType: benefitType as MembershipBenefitType,
+            checkoutSaleId: order.id,
+            checkoutLineItemId: lineId,
+          });
+        }
+      }
+    }
+
     resetForm();
     if (status === CheckoutOrderStatus.COMMITTED) {
       onNavigateToServiceLifeCycle?.();
@@ -980,38 +1184,101 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
               {language === 'zh' ? '尚未加入服務項目' : 'No services selected'}
             </div>
           ) : (
-            selectedLines.map(line => (
-              <div key={line.id} className="flex items-center justify-between rounded-xl bg-slate-50 dark:bg-white/5 px-3 py-2 gap-3">
-                <div>
-                  <p className="text-sm font-black text-slate-900 dark:text-white">{line.name}</p>
-                  <p className="text-xs font-semibold text-slate-500 dark:text-slate-300">{formatCurrency(line.lineSubtotal)}</p>
+            selectedLines.map(line => {
+              const activeMembership = selectedCustomerId ? activeMembershipByCustomerId.get(selectedCustomerId) : undefined;
+              const showBenefits = !line.isDiscount && !isReadOnly;
+              const canUseBenefit = !!activeMembership && (activeMembership.complimentaryCarCareUpgradeSnapshot > 0 || activeMembership.hzmbServiceSnapshot > 0);
+              const { allowsCarCareCoupon, allowsHzmbCoupon } = getLineCouponEligibility(line);
+              const ccSelectedCount = Object.values(lineBenefits).filter(bt => bt === 'car_care_upgrade').length;
+              const hzmbSelectedCount = Object.values(lineBenefits).filter(bt => bt === 'hzmb_shuttle').length;
+              const ccRemainingAfterSelection = Math.max(0, benefitRemaining.car_care_upgrade - ccSelectedCount);
+              const hzmbRemainingAfterSelection = Math.max(0, benefitRemaining.hzmb_shuttle - hzmbSelectedCount);
+              return (
+                <div key={line.id} className="rounded-xl bg-slate-50 dark:bg-white/5 px-3 py-2 space-y-1.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-black text-slate-900 dark:text-white">{line.name}</p>
+                      <p className="text-xs font-semibold text-slate-500 dark:text-slate-300">{formatCurrency(line.lineSubtotal)}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => updateLineQuantity(line.id, line.quantity - 1)}
+                        disabled={isReadOnly || line.quantity <= 1}
+                        className="w-8 h-8 rounded-full bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-200 disabled:opacity-50"
+                      >
+                        <i className="fas fa-minus text-[10px]"></i>
+                      </button>
+                      <span className="min-w-6 text-center text-xs font-black text-slate-700 dark:text-slate-200">{line.quantity}</span>
+                      <button
+                        onClick={() => updateLineQuantity(line.id, line.quantity + 1)}
+                        disabled={isReadOnly}
+                        className="w-8 h-8 rounded-full bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-200 disabled:opacity-50"
+                      >
+                        <i className="fas fa-plus text-[10px]"></i>
+                      </button>
+                      <button
+                        onClick={() => removeLine(line.id)}
+                        disabled={isReadOnly}
+                        className="w-8 h-8 rounded-full bg-rose-50 dark:bg-rose-900/20 text-rose-600 disabled:opacity-50"
+                      >
+                        <i className="fas fa-times text-xs"></i>
+                      </button>
+                    </div>
+                  </div>
+                  {showBenefits && (
+                    <div className="rounded-lg border border-slate-200 dark:border-white/10 bg-white/60 dark:bg-white/5 px-2 py-1.5">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">
+                        {language === 'zh' ? '套用會員券' : 'Apply Membership Coupon'}
+                      </p>
+                      {canUseBenefit && activeMembership ? (
+                        <div className="flex gap-1.5 flex-wrap">
+                          {activeMembership.complimentaryCarCareUpgradeSnapshot > 0 && allowsCarCareCoupon && (
+                            <button
+                              onClick={() => toggleLineBenefit(line.id, 'car_care_upgrade')}
+                              disabled={lineBenefits[line.id] !== 'car_care_upgrade' && ccRemainingAfterSelection <= 0}
+                              title={language === 'zh' ? `${getUpgradeCouponName(line)}（升級券）` : `${getUpgradeCouponName(line)} (upgrade coupon)`}
+                              className={`flex items-center gap-1 text-[10px] font-black px-2 py-0.5 rounded-full border transition-all ${
+                                lineBenefits[line.id] === 'car_care_upgrade'
+                                  ? 'bg-blue-600 text-white border-blue-600'
+                                  : ccRemainingAfterSelection > 0
+                                    ? 'bg-transparent text-blue-600 border-blue-300 dark:border-blue-700 hover:bg-blue-50 dark:hover:bg-blue-900/20'
+                                    : 'bg-transparent text-slate-400 border-slate-200 dark:border-white/10 opacity-50 cursor-not-allowed'
+                              }`}
+                            >
+                              <i className="fas fa-star text-[8px]"></i>
+                              {getUpgradeCouponName(line)} ({ccRemainingAfterSelection})
+                            </button>
+                          )}
+                          {activeMembership.hzmbServiceSnapshot > 0 && allowsHzmbCoupon && (
+                            <button
+                              onClick={() => toggleLineBenefit(line.id, 'hzmb_shuttle')}
+                              disabled={lineBenefits[line.id] !== 'hzmb_shuttle' && hzmbRemainingAfterSelection <= 0}
+                              title={language === 'zh' ? '港珠澳接送優惠券' : 'HZMB Shuttle Coupon'}
+                              className={`flex items-center gap-1 text-[10px] font-black px-2 py-0.5 rounded-full border transition-all ${
+                                lineBenefits[line.id] === 'hzmb_shuttle'
+                                  ? 'bg-violet-600 text-white border-violet-600'
+                                  : hzmbRemainingAfterSelection > 0
+                                    ? 'bg-transparent text-violet-600 border-violet-300 dark:border-violet-700 hover:bg-violet-50 dark:hover:bg-violet-900/20'
+                                    : 'bg-transparent text-slate-400 border-slate-200 dark:border-white/10 opacity-50 cursor-not-allowed'
+                              }`}
+                            >
+                              <i className="fas fa-ship text-[8px]"></i>
+                              {language === 'zh' ? '港珠澳' : 'HZMB'} ({hzmbRemainingAfterSelection})
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                          {activeMembership
+                            ? (language === 'zh' ? '此會員級別沒有可用的 Car Care / HZMB 券。' : 'This membership has no Car Care / HZMB coupons configured.')
+                            : (language === 'zh' ? '請先選擇有啟用會員的客戶。' : 'Select a customer with an active membership first.')}
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => updateLineQuantity(line.id, line.quantity - 1)}
-                    disabled={isReadOnly || line.quantity <= 1}
-                    className="w-8 h-8 rounded-full bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-200 disabled:opacity-50"
-                  >
-                    <i className="fas fa-minus text-[10px]"></i>
-                  </button>
-                  <span className="min-w-6 text-center text-xs font-black text-slate-700 dark:text-slate-200">{line.quantity}</span>
-                  <button
-                    onClick={() => updateLineQuantity(line.id, line.quantity + 1)}
-                    disabled={isReadOnly}
-                    className="w-8 h-8 rounded-full bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-200 disabled:opacity-50"
-                  >
-                    <i className="fas fa-plus text-[10px]"></i>
-                  </button>
-                  <button
-                    onClick={() => removeLine(line.id)}
-                    disabled={isReadOnly}
-                    className="w-8 h-8 rounded-full bg-rose-50 dark:bg-rose-900/20 text-rose-600 disabled:opacity-50"
-                  >
-                    <i className="fas fa-times text-xs"></i>
-                  </button>
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
 
@@ -1083,6 +1350,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
 
         <div className="rounded-xl border border-slate-200 dark:border-white/10 p-3 bg-slate-50 dark:bg-white/5 grid md:grid-cols-6 gap-2 text-sm font-bold">
           <p>{language === 'zh' ? '毛額' : 'Gross'}: {formatCurrency(grossAmount)}</p>
+          {benefitDiscountTotal > 0 && <p className="text-rose-600 dark:text-rose-400">{language === 'zh' ? '會員優惠折扣' : 'Benefit Discount'}: -{formatCurrency(benefitDiscountTotal)}</p>}
           <p>{language === 'zh' ? '大型車加收' : 'Large Surcharge'}: +{formatCurrency(largeVehicleSurchargeAmount)}</p>
           <p>{language === 'zh' ? '會員折扣' : 'Membership'}: -{formatCurrency(membershipDiscountAmount)}</p>
           <p>{language === 'zh' ? '優惠券' : 'Coupon'}: -{formatCurrency(couponDiscountAmount)}</p>

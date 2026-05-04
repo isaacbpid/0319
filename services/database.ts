@@ -1,6 +1,6 @@
-
+﻿
 import { createClient } from '@supabase/supabase-js';
-import { Transaction, TransactionType, CloudConfig, AuditAction, AuditLog, Note, CategoryItem, Customer, CustomerGroup, Vehicle, BankBalanceTransaction, Account, AccountType, CurrencyExchangeRate, DiscountItem, CheckoutOrder, CheckoutOrderLine, CheckoutOrderStatus, MembershipTier, CustomerMembership, VehicleType, VehicleSize, PaymentCurrency, PaymentMethod, PaymentStatus, EmployeePageKey, EmployeePagePermission, EmployeeUser, ChargingRateConfig, ChargingSession, ChargingStatus, Appointment, AppointmentStatus } from '../types';
+import { Transaction, TransactionType, CloudConfig, AuditAction, AuditLog, Note, CategoryItem, Customer, CustomerGroup, Vehicle, BankBalanceTransaction, Account, AccountType, CurrencyExchangeRate, DiscountItem, CheckoutOrder, CheckoutOrderLine, CheckoutOrderStatus, MembershipTier, CustomerMembership, VehicleType, VehicleSize, PaymentCurrency, PaymentMethod, PaymentStatus, EmployeePageKey, EmployeePagePermission, EmployeeUser, ChargingRateConfig, ChargingSession, ChargingStatus, Appointment, AppointmentStatus, Locker, LockerReservation, LockerReservationStatus, LockerReservationType, LockerServiceType } from '../types';
 import { getPrimaryCategoryId, getTransactionAmount, getTransactionDescription, normalizeTransactionItems, parseItemsFromNotes, serializeItemsIntoNotes } from '../utils/transactionItems';
 import { getSplitDisplayLabel, getTransactionSplit } from '../utils/transactionSplit';
 
@@ -62,6 +62,9 @@ const VALID_PAYMENT_STATUSES = new Set<PaymentStatus>(['pending', 'paid']);
 const VALID_PAYMENT_METHODS = new Set<PaymentMethod>(Object.values(PaymentMethod));
 const VALID_PAYMENT_CURRENCIES = new Set<PaymentCurrency>(Object.values(PaymentCurrency));
 const VALID_CHARGING_STATUSES = new Set<ChargingStatus>(['IDLE', 'CHARGING', 'COMPLETED']);
+const VALID_LOCKER_RESERVATION_TYPES = new Set<LockerReservationType>(['deposit', 'pickup']);
+const VALID_LOCKER_RESERVATION_STATUSES = new Set<LockerReservationStatus>(['reserved', 'stored', 'collected', 'cancelled']);
+const VALID_LOCKER_SERVICE_TYPES = new Set<LockerServiceType>(['deposit_only', 'pickup_only', 'deposit_and_pickup']);
 const FIXED_MEMBERSHIP_TIER_NAME_BY_ID: Record<string, string> = {
   tier_guest: 'Guest',
   tier_plus: 'Plus',
@@ -86,7 +89,7 @@ const LARGE_VEHICLE_TYPES = new Set<string>([
   VehicleType.LIMOUSINE,
 ]);
 
-export const DEFAULT_EMPLOYEE_PAGE_KEYS: EmployeePageKey[] = ['transactions', 'input', 'settings', 'vehicles', 'customers', 'completed_checkout', 'service_lifecycle', 'charging', 'appointments'];
+export const DEFAULT_EMPLOYEE_PAGE_KEYS: EmployeePageKey[] = ['transactions', 'input', 'settings', 'vehicles', 'customers', 'completed_checkout', 'service_lifecycle', 'locker_deposit', 'locker_pickup', 'charging', 'appointments'];
 
 const normalizeChargingStatus = (value: unknown): ChargingStatus => {
   if (typeof value !== 'string') return 'IDLE';
@@ -149,6 +152,34 @@ const isPaymentMethodCurrencyCompatible = (
   if (method === PaymentMethod.MPAY) return currency === PaymentCurrency.MOP;
   return true;
 };
+
+const normalizeLockerReservationType = (value: unknown): LockerReservationType => {
+  if (typeof value !== 'string') return 'deposit';
+  const normalized = value.trim().toLowerCase();
+  return VALID_LOCKER_RESERVATION_TYPES.has(normalized as LockerReservationType)
+    ? (normalized as LockerReservationType)
+    : 'deposit';
+};
+
+const normalizeLockerReservationStatus = (value: unknown): LockerReservationStatus => {
+  if (typeof value !== 'string') return 'reserved';
+  const normalized = value.trim().toLowerCase();
+  return VALID_LOCKER_RESERVATION_STATUSES.has(normalized as LockerReservationStatus)
+    ? (normalized as LockerReservationStatus)
+    : 'reserved';
+};
+
+const normalizeLockerServiceType = (value: unknown): LockerServiceType | null => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return null;
+  return VALID_LOCKER_SERVICE_TYPES.has(normalized as LockerServiceType)
+    ? (normalized as LockerServiceType)
+    : null;
+};
+
+const normalizePlateKey = (value?: string | null): string =>
+  normalizeRequiredText(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
 const normalizeNumber = (value: unknown, fallback = 0): number => {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -267,13 +298,19 @@ const isMissingCheckoutPreInspectionColumn = (error: any): boolean => {
       message.includes('attention_details') ||
       message.includes('customer_additional_comments') ||
       message.includes('pre_inspection_completed') ||
-      message.includes('pre_inspection_completed_at')
+      message.includes('pre_inspection_completed_at') ||
+      message.includes('locker_service_type') ||
+      message.includes('locker_deposit_reservation_id') ||
+      message.includes('locker_pickup_reservation_id')
     )) ||
     (message.includes('checkout_sales') && (
       message.includes('attention_details') ||
       message.includes('customer_additional_comments') ||
       message.includes('pre_inspection_completed') ||
-      message.includes('pre_inspection_completed_at')
+      message.includes('pre_inspection_completed_at') ||
+      message.includes('locker_service_type') ||
+      message.includes('locker_deposit_reservation_id') ||
+      message.includes('locker_pickup_reservation_id')
     ))
   );
 };
@@ -343,6 +380,17 @@ const normalizeTransactionForSync = (transaction: Transaction): { row?: SyncedTr
     return { errors };
   }
 
+  const shouldForceEqualSplitForPayment = Boolean(paymentMethod) && !split.isSplit;
+  const splitMode = shouldForceEqualSplitForPayment
+    ? 'EQUAL'
+    : (split.isSplit ? split.splitMode : null);
+  const splitRatioA = shouldForceEqualSplitForPayment
+    ? 0.5
+    : (split.isSplit ? Number(split.splitRatioA.toFixed(4)) : null);
+  const splitRatioB = shouldForceEqualSplitForPayment
+    ? 0.5
+    : (split.isSplit ? Number(split.splitRatioB.toFixed(4)) : null);
+
   return {
     row: {
       id,
@@ -360,9 +408,9 @@ const normalizeTransactionForSync = (transaction: Transaction): { row?: SyncedTr
       is_initial_investment: Boolean(transaction.isInitialInvestment),
       notes: serializeItemsIntoNotes(items, transaction.notes),
       customer_id: normalizeNullableText(transaction.customerId),
-      split_mode: split.isSplit ? split.splitMode : null,
-      split_ratio_a: split.isSplit ? Number(split.splitRatioA.toFixed(4)) : null,
-      split_ratio_b: split.isSplit ? Number(split.splitRatioB.toFixed(4)) : null,
+      split_mode: splitMode,
+      split_ratio_a: splitRatioA,
+      split_ratio_b: splitRatioB,
       checkout_order_id: normalizeNullableText(transaction.checkoutOrderId),
       payment_status: normalizePaymentStatus(transaction.paymentStatus, 'paid'),
       payment_method: paymentMethod,
@@ -1298,6 +1346,9 @@ export const fetchRemoteCheckoutOrders = async (): Promise<{ data: CheckoutOrder
       paidAt: row.paid_at || undefined,
       linkedTransactionId: row.linked_transaction_id || undefined,
       invoiceNumber: row.invoice_number || undefined,
+      lockerServiceType: normalizeLockerServiceType(row.locker_service_type) || undefined,
+      lockerDepositReservationId: row.locker_deposit_reservation_id || undefined,
+      lockerPickupReservationId: row.locker_pickup_reservation_id || undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at || undefined,
       lines: linesBySale.get(row.id) || [],
@@ -1320,37 +1371,23 @@ export const syncRemoteCheckoutOrders = async (orders: CheckoutOrder[]): Promise
     async function assignInvoiceNumberIfNeeded(order: CheckoutOrder): Promise<string | undefined> {
       if (order.status !== 'checked_out') return order.invoiceNumber;
       if (order.invoiceNumber) return order.invoiceNumber;
-      // Get year YY
+
       const checkedOutAt = order.checkedOutAt || now;
       const year = new Date(checkedOutAt).getFullYear();
       const yy = String(year).slice(-2);
-      // Retry logic for concurrent requests (handle race condition)
+
       for (let attempt = 0; attempt < 5; attempt++) {
-        const { data: runRow, error: runError } = await supabase
-          .from('invoice_run_numbers')
-          .select('last_run_number')
-          .eq('year', year)
-          .single();
-        if (runRow && !runError) {
-          const runNumber = runRow.last_run_number + 1;
-          const { error: updateError } = await supabase
-            .from('invoice_run_numbers')
-            .update({ last_run_number: runNumber, updated_at: now })
-            .eq('year', year);
-          if (!updateError) {
-            return `${yy}${String(runNumber).padStart(4, '0')}`;
-          }
-        } else {
-          const { error: insertError } = await supabase
-            .from('invoice_run_numbers')
-            .insert([{ year, last_run_number: 1, updated_at: now }]);
-          if (!insertError) {
-            return `${yy}0001`;
-          }
+        const { data, error } = await supabase.rpc('reserve_running_number', {
+          p_number_type: 'invoice',
+          p_year: year,
+        });
+        const runNumber = Number(data);
+        if (!error && Number.isFinite(runNumber) && runNumber > 0) {
+          return `${yy}${String(Math.trunc(runNumber)).padStart(4, '0')}`;
         }
-        // Exponential backoff on retry
         await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 50));
       }
+
       throw new Error('Failed to assign invoice number after retries');
     }
 
@@ -1406,6 +1443,9 @@ export const syncRemoteCheckoutOrders = async (orders: CheckoutOrder[]): Promise
       created_at: order.createdAt || now,
       updated_at: order.updatedAt || now,
       invoice_number: order.invoiceNumber || null,
+      locker_service_type: normalizeLockerServiceType(order.lockerServiceType),
+      locker_deposit_reservation_id: normalizeNullableText(order.lockerDepositReservationId),
+      locker_pickup_reservation_id: normalizeNullableText(order.lockerPickupReservationId),
     }));
 
     const { error: salesError } = await supabase
@@ -1424,6 +1464,9 @@ export const syncRemoteCheckoutOrders = async (orders: CheckoutOrder[]): Promise
           pre_inspection_completed_at,
           attention_details,
           customer_additional_comments,
+          locker_service_type,
+          locker_deposit_reservation_id,
+          locker_pickup_reservation_id,
           ...legacyRow
         } = row;
         return legacyRow;
@@ -1633,6 +1676,286 @@ export const subscribeToCheckoutOrders = (onUpdate: () => void) => {
     .channel('checkout_orders_channel')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'checkout_sales' }, () => onUpdate())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'checkout_line_items' }, () => onUpdate())
+    .subscribe();
+};
+
+export const fetchRemoteLockers = async (): Promise<{ data: Locker[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await withRetry(() => supabase!
+      .from('lockers')
+      .select('*')
+      .order('location_code', { ascending: true })
+      .order('locker_number', { ascending: true })) as any;
+
+    if (error) return { data: null, error: error.message };
+
+    const mapped: Locker[] = (data || []).map((row: any) => ({
+      id: row.id,
+      locationCode: row.location_code || 'main',
+      lockerNumber: Math.max(1, Math.round(normalizeNumber(row.locker_number, 1))),
+      isActive: row.is_active !== false,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at || undefined,
+    }));
+
+    return { data: mapped };
+  } catch (e: any) {
+    return { data: null, error: e?.message || 'Unknown fetch lockers error' };
+  }
+};
+
+export const fetchRemoteLockerReservations = async (): Promise<{ data: LockerReservation[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await withRetry(() => supabase!
+      .from('locker_reservations')
+      .select('*')
+      .order('created_at', { ascending: false })) as any;
+
+    if (error) return { data: null, error: error.message };
+
+    const mapped: LockerReservation[] = (data || []).map((row: any) => ({
+      id: row.id,
+      lockerId: row.locker_id,
+      checkoutOrderId: row.checkout_order_id || undefined,
+      vehicleId: row.vehicle_id || undefined,
+      plateNumber: row.plate_number || '',
+      reservationType: normalizeLockerReservationType(row.reservation_type),
+      status: normalizeLockerReservationStatus(row.status),
+      itemDescription: row.item_description || undefined,
+      createdBy: row.created_by || undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at || undefined,
+      storedAt: row.stored_at || undefined,
+      collectedAt: row.collected_at || undefined,
+    }));
+
+    return { data: mapped };
+  } catch (e: any) {
+    return { data: null, error: e?.message || 'Unknown fetch locker reservation error' };
+  }
+};
+
+export const createLockerDepositReservationAutoAssign = async (input: {
+  plateNumber: string;
+  itemDescription?: string;
+  checkoutOrderId?: string;
+  vehicleId?: string;
+  createdBy?: string;
+}): Promise<{ success: boolean; reservation?: LockerReservation; locker?: Locker; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+
+  const plateNumber = normalizeRequiredText(input.plateNumber).toUpperCase();
+  if (!plateNumber) return { success: false, error: 'Plate number is required' };
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const { data: lockersRows, error: lockersError } = await supabase
+        .from('lockers')
+        .select('*')
+        .eq('is_active', true)
+        .order('location_code', { ascending: true })
+        .order('locker_number', { ascending: true });
+
+      if (lockersError) return { success: false, error: lockersError.message };
+
+      const lockers = (lockersRows || []) as any[];
+      if (lockers.length === 0) {
+        return { success: false, error: 'No active locker found' };
+      }
+
+      const lockerIds = lockers.map((row) => row.id);
+      const { data: busyRows, error: busyError } = await supabase
+        .from('locker_reservations')
+        .select('locker_id')
+        .in('locker_id', lockerIds)
+        .in('status', ['reserved', 'stored']);
+
+      if (busyError) return { success: false, error: busyError.message };
+
+      const busyLockerIds = new Set((busyRows || []).map((row: any) => row.locker_id));
+      const selectedLockerRow = lockers.find((row) => !busyLockerIds.has(row.id));
+      if (!selectedLockerRow) {
+        return { success: false, error: 'All lockers are currently occupied' };
+      }
+
+      const now = new Date().toISOString();
+      const row = {
+        id: `lkr_${crypto.randomUUID()}`,
+        locker_id: selectedLockerRow.id,
+        checkout_order_id: normalizeNullableText(input.checkoutOrderId),
+        vehicle_id: normalizeNullableText(input.vehicleId),
+        plate_number: plateNumber,
+        reservation_type: 'deposit',
+        status: 'stored',
+        item_description: normalizeNullableText(input.itemDescription),
+        created_by: normalizeNullableText(input.createdBy),
+        created_at: now,
+        updated_at: now,
+        stored_at: now,
+        collected_at: null,
+      };
+
+      const { data: insertedRows, error: insertError } = await supabase
+        .from('locker_reservations')
+        .insert(row)
+        .select('*')
+        .limit(1);
+
+      if (insertError) {
+        if (insertError?.code === '23505') continue;
+        return { success: false, error: insertError.message };
+      }
+
+      if (input.checkoutOrderId) {
+        await supabase
+          .from('checkout_sales')
+          .update({
+            locker_service_type: 'deposit_and_pickup',
+            locker_deposit_reservation_id: row.id,
+            updated_at: now,
+          })
+          .eq('id', input.checkoutOrderId);
+      }
+
+      await logAuditEvent(
+        AuditAction.CREATE,
+        'locker_reservations',
+        row.id,
+        normalizeRequiredText(input.createdBy) || undefined,
+        undefined,
+        {
+          locker_id: row.locker_id,
+          checkout_order_id: row.checkout_order_id,
+          plate_number: row.plate_number,
+          status: row.status,
+        }
+      );
+
+      const inserted = insertedRows?.[0] || row;
+      const reservation: LockerReservation = {
+        id: inserted.id,
+        lockerId: inserted.locker_id,
+        checkoutOrderId: inserted.checkout_order_id || undefined,
+        vehicleId: inserted.vehicle_id || undefined,
+        plateNumber: inserted.plate_number || plateNumber,
+        reservationType: normalizeLockerReservationType(inserted.reservation_type),
+        status: normalizeLockerReservationStatus(inserted.status),
+        itemDescription: inserted.item_description || undefined,
+        createdBy: inserted.created_by || undefined,
+        createdAt: inserted.created_at || now,
+        updatedAt: inserted.updated_at || now,
+        storedAt: inserted.stored_at || now,
+        collectedAt: inserted.collected_at || undefined,
+      };
+
+      const locker: Locker = {
+        id: selectedLockerRow.id,
+        locationCode: selectedLockerRow.location_code || 'main',
+        lockerNumber: Math.max(1, Math.round(normalizeNumber(selectedLockerRow.locker_number, 1))),
+        isActive: selectedLockerRow.is_active !== false,
+        createdAt: selectedLockerRow.created_at,
+        updatedAt: selectedLockerRow.updated_at || undefined,
+      };
+
+      return { success: true, reservation, locker };
+    } catch (e: any) {
+      if (attempt === 4) {
+        return { success: false, error: e?.message || 'Unknown locker assignment error' };
+      }
+    }
+  }
+
+  return { success: false, error: 'Unable to reserve a locker. Please retry.' };
+};
+
+export const confirmLockerPickupByPlate = async (input: {
+  reservationId: string;
+  plateNumber: string;
+  changedBy?: string;
+}): Promise<{ success: boolean; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+
+  const reservationId = normalizeRequiredText(input.reservationId);
+  const plateNumber = normalizeRequiredText(input.plateNumber).toUpperCase();
+  if (!reservationId || !plateNumber) {
+    return { success: false, error: 'Reservation and plate number are required' };
+  }
+
+  try {
+    const { data: row, error: fetchError } = await supabase
+      .from('locker_reservations')
+      .select('*')
+      .eq('id', reservationId)
+      .limit(1)
+      .maybeSingle();
+
+    if (fetchError) return { success: false, error: fetchError.message };
+    if (!row) return { success: false, error: 'Locker reservation not found' };
+
+    const currentStatus = normalizeLockerReservationStatus(row.status);
+    if (currentStatus === 'collected' || currentStatus === 'cancelled') {
+      return { success: false, error: 'Locker reservation is already closed' };
+    }
+
+    if (normalizePlateKey(row.plate_number) !== normalizePlateKey(plateNumber)) {
+      return { success: false, error: 'Plate number does not match this locker item' };
+    }
+
+    const now = new Date().toISOString();
+    const patch = {
+      status: 'collected',
+      collected_at: now,
+      updated_at: now,
+      reservation_type: row.reservation_type || 'pickup',
+    };
+
+    const { error: updateError } = await supabase
+      .from('locker_reservations')
+      .update(patch)
+      .eq('id', reservationId);
+
+    if (updateError) return { success: false, error: updateError.message };
+
+    if (row.checkout_order_id) {
+      await supabase
+        .from('checkout_sales')
+        .update({
+          locker_service_type: 'deposit_and_pickup',
+          locker_pickup_reservation_id: reservationId,
+          updated_at: now,
+        })
+        .eq('id', row.checkout_order_id);
+    }
+
+    await logAuditEvent(
+      AuditAction.UPDATE,
+      'locker_reservations',
+      reservationId,
+      normalizeRequiredText(input.changedBy) || undefined,
+      {
+        status: row.status,
+        collected_at: row.collected_at,
+      },
+      {
+        status: 'collected',
+        collected_at: now,
+      }
+    );
+
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Unknown locker pickup error' };
+  }
+};
+
+export const subscribeToLockerReservations = (onUpdate: () => void) => {
+  if (!supabase) return null;
+  return supabase
+    .channel('locker_reservations_channel')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'lockers' }, () => onUpdate())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'locker_reservations' }, () => onUpdate())
     .subscribe();
 };
 
@@ -2681,22 +3004,20 @@ export const fetchRemoteMembershipTiers = async (): Promise<{ data: MembershipTi
     const mappedData = (data || []).map((row: any) => ({
       id: row.id,
       name: row.name,
-      statusPointsThreshold: Math.max(0, Math.round(normalizeNumber(row.status_points_threshold, 0))),
-      discountRate: normalizeNumber(row.discount_rate, 0),
+      statusPointsThreshold: Math.max(0, Math.round(normalizeNumber(row.status_points_threshold, normalizeNumber(row.status_points, 0)))),
+      discountedRate: normalizeNumber(row.discounted_rate, 0),
       discountEligibleCarLimit: Math.max(0, Math.round(normalizeNumber(row.discount_eligible_car_limit, 0))),
-      upgradeThreshold: Math.max(0, normalizeNumber(row.upgrade_threshold, 0)),
+      complimentaryCarCareUpgrade: Math.max(0, Math.round(normalizeNumber(row.complimentary_car_care_upgrade, 0))),
       priorityLevel: Math.max(0, Math.round(normalizeNumber(row.priority_level, 0))),
       exclusiveEvents: row.exclusive_events === true,
       isActive: row.is_active !== false,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      statusPoints: Math.max(0, Math.round(normalizeNumber(row.status_points, normalizeNumber(row.status_points_threshold, 0)))),
       birthdayGift: row.birthday_gift === true,
-      discountedRate: normalizeNumber(row.discounted_rate, normalizeNumber(row.discount_rate, 0)),
       linkedLicensePlates: Math.max(0, Math.round(normalizeNumber(row.linked_license_plates, normalizeNumber(row.discount_eligible_car_limit, 0)))),
-      complimentaryCarCareUpgrade: Math.max(0, Math.round(normalizeNumber(row.complimentary_car_care_upgrade, 0))),
+      hzmbService: Math.max(0, Math.round(normalizeNumber(row.hzmb_service, 0))),
       priorityWash: Math.max(0, Math.round(normalizeNumber(row.priority_wash, normalizeNumber(row.priority_level, 0)))),
-      exclusiveInvitation: row.exclusive_invitation === true,
+      evChargingRates: Math.max(0, normalizeNumber(row.ev_charging_rates, 0)),
     }));
 
     return { data: mappedData };
@@ -2716,22 +3037,20 @@ export const syncRemoteMembershipTiers = async (tiers: MembershipTier[]): Promis
       id: tier.id,
       // Keep DB-compatible fixed names even if stale local data differs.
       name: FIXED_MEMBERSHIP_TIER_NAME_BY_ID[tier.id] || tier.name,
-      status_points_threshold: Math.max(0, Math.round(normalizeNumber(tier.statusPointsThreshold, tier.statusPoints))),
-      discount_rate: Math.max(0, normalizeNumber(tier.discountRate, tier.discountedRate)),
+      status_points_threshold: Math.max(0, Math.round(normalizeNumber(tier.statusPointsThreshold, 0))),
+      discounted_rate: Math.max(0, normalizeNumber(tier.discountedRate, 0)),
       discount_eligible_car_limit: Math.max(0, Math.round(normalizeNumber(tier.discountEligibleCarLimit, tier.linkedLicensePlates))),
-      upgrade_threshold: Math.max(0, normalizeNumber(tier.upgradeThreshold, 0)),
+      complimentary_car_care_upgrade: Math.max(0, Math.round(normalizeNumber(tier.complimentaryCarCareUpgrade, 0))),
       priority_level: Math.max(0, Math.round(normalizeNumber(tier.priorityLevel, tier.priorityWash))),
       exclusive_events: tier.exclusiveEvents === true,
       is_active: tier.isActive !== false,
       created_at: tier.createdAt || new Date().toISOString(),
       updated_at: tier.updatedAt || new Date().toISOString(),
-      status_points: Math.max(0, Math.round(normalizeNumber(tier.statusPoints, tier.statusPointsThreshold))),
       birthday_gift: tier.birthdayGift === true,
-      discounted_rate: Math.max(0, normalizeNumber(tier.discountedRate, tier.discountRate)),
       linked_license_plates: Math.max(0, Math.round(normalizeNumber(tier.linkedLicensePlates, tier.discountEligibleCarLimit))),
-      complimentary_car_care_upgrade: Math.max(0, Math.round(normalizeNumber(tier.complimentaryCarCareUpgrade, 0))),
+      hzmb_service: Math.max(0, Math.round(normalizeNumber(tier.hzmbService, 0))),
       priority_wash: Math.max(0, Math.round(normalizeNumber(tier.priorityWash, tier.priorityLevel))),
-      exclusive_invitation: tier.exclusiveInvitation === true,
+      ev_charging_rates: Math.max(0, normalizeNumber(tier.evChargingRates, 0)),
     }));
 
     if (rows.length === 0) {
@@ -2770,7 +3089,7 @@ export const fetchRemoteCustomerMemberships = async (): Promise<{ data: Customer
       id: row.id,
       customerId: row.customer_id,
       tierId: row.tier_id,
-      discountRateSnapshot: normalizeNumber(row.discount_rate_snapshot, 0),
+      discountedRateSnapshot: normalizeNumber(row.discounted_rate_snapshot, 0),
       discountEligibleCarLimitSnapshot: Math.max(0, Math.round(normalizeNumber(row.discount_eligible_car_limit_snapshot, 0))),
       priorityLevelSnapshot: Math.max(0, Math.round(normalizeNumber(row.priority_level_snapshot, 0))),
       exclusiveEventsSnapshot: row.exclusive_events_snapshot === true,
@@ -2782,11 +3101,15 @@ export const fetchRemoteCustomerMemberships = async (): Promise<{ data: Customer
       updatedAt: row.updated_at,
       statusPointsSnapshot: Math.max(0, Math.round(normalizeNumber(row.status_points_snapshot, normalizeNumber(row.status_points, 0)))),
       birthdayGiftSnapshot: row.birthday_gift_snapshot === true,
-      discountedRateSnapshot: normalizeNumber(row.discounted_rate_snapshot, normalizeNumber(row.discount_rate_snapshot, 0)),
       linkedLicensePlatesSnapshot: Math.max(0, Math.round(normalizeNumber(row.linked_license_plates_snapshot, normalizeNumber(row.discount_eligible_car_limit_snapshot, 0)))),
+      hzmbServiceSnapshot: Math.max(0, Math.round(normalizeNumber(row.hzmb_service_snapshot, 0))),
       complimentaryCarCareUpgradeSnapshot: Math.max(0, Math.round(normalizeNumber(row.complimentary_car_care_upgrade_snapshot, 0))),
       priorityWashSnapshot: Math.max(0, Math.round(normalizeNumber(row.priority_wash_snapshot, normalizeNumber(row.priority_level_snapshot, 0)))),
       exclusiveInvitationSnapshot: row.exclusive_invitation_snapshot === true,
+      membershipNo: row.membership_no || undefined,
+      primaryVehicleId: row.primary_vehicle_id || undefined,
+      prepaidAmount: normalizeNumber(row.prepaid_amount, 0),
+      validTill: row.valid_till || undefined,
     }));
 
     return { data: mappedData };
@@ -2804,7 +3127,7 @@ export const syncRemoteCustomerMemberships = async (memberships: CustomerMembers
       id: membership.id,
       customer_id: membership.customerId,
       tier_id: membership.tierId,
-      discount_rate_snapshot: normalizeNumber(membership.discountRateSnapshot, membership.discountedRateSnapshot),
+      discounted_rate_snapshot: normalizeNumber(membership.discountedRateSnapshot, 0),
       discount_eligible_car_limit_snapshot: Math.max(0, Math.round(normalizeNumber(membership.discountEligibleCarLimitSnapshot, membership.linkedLicensePlatesSnapshot))),
       priority_level_snapshot: Math.max(0, Math.round(normalizeNumber(membership.priorityLevelSnapshot, membership.priorityWashSnapshot))),
       exclusive_events_snapshot: membership.exclusiveEventsSnapshot === true,
@@ -2816,11 +3139,15 @@ export const syncRemoteCustomerMemberships = async (memberships: CustomerMembers
       updated_at: membership.updatedAt || new Date().toISOString(),
       status_points_snapshot: Math.max(0, Math.round(normalizeNumber(membership.statusPointsSnapshot, membership.statusPoints))),
       birthday_gift_snapshot: membership.birthdayGiftSnapshot === true,
-      discounted_rate_snapshot: normalizeNumber(membership.discountedRateSnapshot, membership.discountRateSnapshot),
       linked_license_plates_snapshot: Math.max(0, Math.round(normalizeNumber(membership.linkedLicensePlatesSnapshot, membership.discountEligibleCarLimitSnapshot))),
+      hzmb_service_snapshot: Math.max(0, Math.round(normalizeNumber(membership.hzmbServiceSnapshot, 0))),
       complimentary_car_care_upgrade_snapshot: Math.max(0, Math.round(normalizeNumber(membership.complimentaryCarCareUpgradeSnapshot, 0))),
       priority_wash_snapshot: Math.max(0, Math.round(normalizeNumber(membership.priorityWashSnapshot, membership.priorityLevelSnapshot))),
       exclusive_invitation_snapshot: membership.exclusiveInvitationSnapshot === true,
+      membership_no: membership.membershipNo || null,
+      primary_vehicle_id: membership.primaryVehicleId || null,
+      prepaid_amount: Math.max(0, normalizeNumber(membership.prepaidAmount, 0)),
+      valid_till: membership.validTill || null,
     }));
 
     const { error } = await supabase
@@ -2838,12 +3165,245 @@ export const syncRemoteCustomerMemberships = async (memberships: CustomerMembers
   }
 };
 
+export const getNextMembershipNo = async (): Promise<{ membershipNo?: string; error?: string }> => {
+  if (!supabase) return { error: 'Supabase not initialized' };
+  try {
+    const yy = new Date().getFullYear() % 100;
+    const { data, error } = await supabase.rpc('reserve_running_number', {
+      p_number_type: 'membership',
+      p_year: yy,
+    });
+
+    const nextRun = Number(data);
+    if (error || !Number.isFinite(nextRun) || nextRun <= 0) {
+      return { error: error?.message || 'Failed to allocate membership number' };
+    }
+
+    const membershipNo = String(yy).padStart(2, '0') + String(Math.trunc(nextRun)).padStart(4, '0');
+    return { membershipNo };
+  } catch (e: any) {
+    return { error: e?.message || 'Failed to allocate membership number' };
+  }
+};
+
+export const fetchRemoteMembershipPointsLedger = async (
+  membershipId: string
+): Promise<{ data: import('../types').MembershipPointsLedger[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await withRetry(() => supabase!
+      .from('membership_points_ledger')
+      .select('*')
+      .eq('membership_id', membershipId)
+      .order('created_at', { ascending: false })) as any;
+    if (error) return { data: null, error: error.message };
+    const mapped = (data || []).map((row: any) => ({
+      id: row.id,
+      membershipId: row.membership_id,
+      customerId: row.customer_id,
+      entryType: row.entry_type as 'add' | 'redeem' | 'refund_add',
+      pointsDelta: Number(row.points_delta),
+      pointsBalanceAfter: Number(row.points_balance_after),
+      referenceType: row.reference_type || undefined,
+      referenceId: row.reference_id || undefined,
+      notes: row.notes || undefined,
+      createdBy: row.created_by || undefined,
+      createdAt: row.created_at,
+    }));
+    return { data: mapped };
+  } catch (e: any) {
+    return { data: null, error: e?.message || 'Unknown error' };
+  }
+};
+
+export const addMembershipPointsEntry = async (
+  entry: {
+    membershipId: string;
+    customerId: string;
+    entryType: 'add' | 'refund_add';
+    pointsDelta: number;
+    currentBalance: number;
+    referenceType?: string;
+    referenceId?: string;
+    notes?: string;
+    createdBy?: string;
+  }
+): Promise<{ success: boolean; newBalance?: number; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+  const newBalance = entry.currentBalance + Math.abs(entry.pointsDelta);
+  try {
+    const { error: ledgerError } = await supabase.from('membership_points_ledger').insert({
+      id: crypto.randomUUID(),
+      membership_id: entry.membershipId,
+      customer_id: entry.customerId,
+      entry_type: entry.entryType,
+      points_delta: Math.abs(entry.pointsDelta),
+      points_balance_after: newBalance,
+      reference_type: entry.referenceType || null,
+      reference_id: entry.referenceId || null,
+      notes: entry.notes || null,
+      created_by: entry.createdBy || null,
+      created_at: new Date().toISOString(),
+    });
+    if (ledgerError) return { success: false, error: ledgerError.message };
+
+    const { error: balanceError } = await supabase
+      .from('customer_memberships')
+      .update({ status_points: newBalance, updated_at: new Date().toISOString() })
+      .eq('id', entry.membershipId);
+    if (balanceError) return { success: false, error: balanceError.message };
+
+    return { success: true, newBalance };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Unknown error' };
+  }
+};
+
+export const redeemPointsForCheckout = async (
+  membershipId: string,
+  checkoutOrderId: string,
+  pointsAmount: number,
+  currentBalance: number,
+  customerId: string,
+  changedBy?: string
+): Promise<{ success: boolean; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+  if (currentBalance < pointsAmount) {
+    return { success: false, error: 'Insufficient points balance' };
+  }
+  const newBalance = currentBalance - pointsAmount;
+  try {
+    const { error: ledgerError } = await supabase.from('membership_points_ledger').insert({
+      id: crypto.randomUUID(),
+      membership_id: membershipId,
+      customer_id: customerId,
+      entry_type: 'redeem',
+      points_delta: -pointsAmount,
+      points_balance_after: newBalance,
+      reference_type: 'checkout_order',
+      reference_id: checkoutOrderId,
+      notes: null,
+      created_by: changedBy || null,
+      created_at: new Date().toISOString(),
+    });
+    if (ledgerError) return { success: false, error: ledgerError.message };
+
+    const { error: balanceError } = await supabase
+      .from('customer_memberships')
+      .update({ status_points: newBalance, updated_at: new Date().toISOString() })
+      .eq('id', membershipId);
+    if (balanceError) return { success: false, error: balanceError.message };
+
+    await logAuditEvent(
+      'UPDATE' as any,
+      'customer_memberships',
+      membershipId,
+      changedBy,
+      { status_points: currentBalance },
+      { status_points: newBalance, redeemed_for: checkoutOrderId }
+    );
+
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Unknown error' };
+  }
+};
+
 export const subscribeToMembershipTiers = (onUpdate: () => void) => {
   if (!supabase) return null;
   return supabase
     .channel('membership_tiers_channel')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'membership_tiers' }, () => onUpdate())
     .subscribe();
+};
+
+// ============================================================
+// Payment Split Management (Multi-source checkout payments)
+// ============================================================
+
+export const createCheckoutPaymentSplit = async (input: {
+  checkoutId: string;
+  paymentSource: 'prepaid' | 'cash' | 'card' | 'wechat' | 'alipay' | 'bank_transfer' | 'other';
+  amountPaid: number;
+  membershipId?: string;
+  notes?: string;
+}): Promise<{ success: boolean; id?: string; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+  try {
+    const splitId = `split_${input.checkoutId}_${input.paymentSource}_${Date.now()}`;
+    const { error } = await supabase
+      .from('checkout_payment_splits')
+      .insert([{
+        id: splitId,
+        checkout_id: input.checkoutId,
+        payment_source: input.paymentSource,
+        amount_paid: input.amountPaid,
+        membership_id: input.membershipId || null,
+        notes: input.notes || null,
+      }]);
+
+    if (error) return { success: false, error: error.message };
+    return { success: true, id: splitId };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Failed to create payment split' };
+  }
+};
+
+export const fetchCheckoutPaymentSplits = async (checkoutId: string): Promise<{ data: CheckoutPaymentSplit[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await supabase
+      .from('checkout_payment_splits')
+      .select('*')
+      .eq('checkout_id', checkoutId)
+      .order('created_at', { ascending: true });
+
+    if (error) return { data: null, error: error.message };
+
+    const mapped = (data || []).map((row: any) => ({
+      id: row.id,
+      checkoutId: row.checkout_id,
+      paymentSource: row.payment_source,
+      amountPaid: Number(row.amount_paid),
+      membershipId: row.membership_id || undefined,
+      notes: row.notes || undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+
+    return { data: mapped };
+  } catch (e: any) {
+    return { data: null, error: e?.message || 'Unknown error' };
+  }
+};
+
+export const getMembershipPrepaidBalance = async (membershipId: string): Promise<{ balance?: number; error?: string }> => {
+  if (!supabase) return { error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await supabase.rpc('get_membership_prepaid_balance', {
+      p_membership_id: membershipId,
+    });
+
+    if (error) return { error: error.message };
+    return { balance: Number(data) || 0 };
+  } catch (e: any) {
+    return { error: e?.message || 'Failed to calculate balance' };
+  }
+};
+
+export const deleteCheckoutPaymentSplit = async (splitId: string): Promise<{ success: boolean; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+  try {
+    const { error } = await supabase
+      .from('checkout_payment_splits')
+      .delete()
+      .eq('id', splitId);
+
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Failed to delete payment split' };
+  }
 };
 
 export const subscribeToCustomerMemberships = (onUpdate: () => void) => {
@@ -2868,3 +3428,148 @@ export const getServerTime = async (): Promise<string | null> => {
     return new Date().toISOString();
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Membership Benefit Redemptions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Fetch all redemptions for a membership (active + reversed). */
+export const fetchMembershipBenefitRedemptions = async (
+  membershipId: string
+): Promise<{ data: import('../types').MembershipBenefitRedemption[] | null; error?: string }> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await withRetry(() =>
+      supabase!
+        .from('membership_benefit_redemptions')
+        .select('*')
+        .eq('membership_id', membershipId)
+        .order('created_at', { ascending: false })
+    ) as any;
+    if (error) return { data: null, error: error.message };
+    const mapped = (data || []).map((row: any) => ({
+      id: row.id,
+      membershipId: row.membership_id,
+      customerId: row.customer_id,
+      benefitType: row.benefit_type as import('../types').MembershipBenefitType,
+      quantity: Number(row.quantity),
+      checkoutSaleId: row.checkout_sale_id || undefined,
+      checkoutLineItemId: row.checkout_line_item_id || undefined,
+      status: row.status as 'active' | 'reversed',
+      createdBy: row.created_by || undefined,
+      createdAt: row.created_at,
+      reversedAt: row.reversed_at || undefined,
+    }));
+    return { data: mapped };
+  } catch (e: any) {
+    return { data: null, error: e?.message || 'Unknown error' };
+  }
+};
+
+/** Fetch active service rules for membership benefit coupons. */
+export const fetchMembershipBenefitServiceRules = async (): Promise<{
+  data: import('../types').MembershipBenefitServiceRule[] | null;
+  error?: string;
+}> => {
+  if (!supabase) return { data: null, error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await withRetry(() =>
+      supabase!
+        .from('membership_benefit_service_rules')
+        .select('*')
+        .eq('is_active', true)
+    ) as any;
+    if (error) return { data: null, error: error.message };
+    const mapped = (data || []).map((row: any) => ({
+      id: row.id,
+      categoryId: row.category_id,
+      benefitType: row.benefit_type as import('../types').MembershipBenefitType,
+      couponCodeTemplate: row.coupon_code_template,
+      discountMode: row.discount_mode as 'full_line' | 'fixed_amount' | 'percent',
+      discountValue: Number(row.discount_value || 0),
+      isActive: Boolean(row.is_active),
+      notes: row.notes || undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+    return { data: mapped };
+  } catch (e: any) {
+    return { data: null, error: e?.message || 'Unknown error' };
+  }
+};
+
+/** Compute remaining entitlement for a single benefit type via DB function. */
+export const getMembershipBenefitRemaining = async (
+  membershipId: string,
+  benefitType: import('../types').MembershipBenefitType
+): Promise<{ remaining: number | null; error?: string }> => {
+  if (!supabase) return { remaining: null, error: 'Supabase not initialized' };
+  try {
+    const { data, error } = await supabase.rpc('get_membership_benefit_remaining', {
+      p_membership_id: membershipId,
+      p_benefit_type: benefitType,
+    }) as any;
+    if (error) return { remaining: null, error: error.message };
+    return { remaining: Number(data) };
+  } catch (e: any) {
+    return { remaining: null, error: e?.message || 'Unknown error' };
+  }
+};
+
+/** Record one benefit coupon use. Validates remaining count before inserting. */
+export const redeemMembershipBenefit = async (params: {
+  membershipId: string;
+  customerId: string;
+  benefitType: import('../types').MembershipBenefitType;
+  checkoutSaleId: string;
+  checkoutLineItemId: string;
+  createdBy?: string;
+}): Promise<{ success: boolean; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+  // Validate remaining before inserting.
+  const { remaining, error: checkError } = await getMembershipBenefitRemaining(
+    params.membershipId,
+    params.benefitType
+  );
+  if (checkError) return { success: false, error: checkError };
+  if (remaining !== null && remaining <= 0) {
+    return { success: false, error: 'No remaining entitlement for this benefit' };
+  }
+  try {
+    const { error } = await supabase.from('membership_benefit_redemptions').insert({
+      id: crypto.randomUUID(),
+      membership_id: params.membershipId,
+      customer_id: params.customerId,
+      benefit_type: params.benefitType,
+      quantity: 1,
+      checkout_sale_id: params.checkoutSaleId,
+      checkout_line_item_id: params.checkoutLineItemId,
+      status: 'active',
+      created_by: params.createdBy || null,
+      created_at: new Date().toISOString(),
+    });
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Unknown error' };
+  }
+};
+
+/** Reverse a benefit redemption (e.g. when an order is cancelled). */
+export const reverseMembershipBenefitRedemption = async (
+  redemptionId: string
+): Promise<{ success: boolean; error?: string }> => {
+  if (!supabase) return { success: false, error: 'Supabase not initialized' };
+  try {
+    const { error } = await supabase
+      .from('membership_benefit_redemptions')
+      .update({ status: 'reversed', reversed_at: new Date().toISOString() })
+      .eq('id', redemptionId)
+      .eq('status', 'active');
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Unknown error' };
+  }
+};
+

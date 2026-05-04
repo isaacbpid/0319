@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import CustomerPromptSelect from './CustomerPromptSelect';
-import { CategoryItem, Customer, CustomerGroup, Transaction, TransactionType, Vehicle, VehicleSize, VehicleType } from '../types';
+import { CategoryItem, Customer, CustomerGroup, CustomerMembership, Transaction, TransactionType, Vehicle, VehicleSize, VehicleType } from '../types';
 import LicensePlateField from './LicensePlateField';
 import { translations } from '../translations';
 import { normalizeLicensePlate } from '../utils/licensePlate';
 import { VEHICLE_COLORS, VEHICLE_MAKES_EXTENDED, getVehicleModelsForMake } from '../vehicleData_v2';
+import { getMembershipPrepaidBalance } from '../services/database';
 
 interface CustomerPageProps {
   customers: Customer[];
@@ -12,6 +13,7 @@ interface CustomerPageProps {
   vehicles: Vehicle[];
   transactions: Transaction[];
   categories: CategoryItem[];
+  customerMemberships?: CustomerMembership[];
   onBack: () => void;
   onSaveCustomer: (
     customer: Customer,
@@ -124,6 +126,7 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
   vehicles,
   transactions,
   categories,
+  customerMemberships = [],
   onBack,
   onSaveCustomer,
   onDeleteCustomer,
@@ -150,6 +153,8 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
   const [showGroupManager, setShowGroupManager] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [isSavingGroup, setIsSavingGroup] = useState(false);
+  const [membershipPrepaidBalance, setMembershipPrepaidBalance] = useState<number | null>(null);
+  const [membershipPrepaidLoading, setMembershipPrepaidLoading] = useState(false);
 
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [showCustomerForm, setShowCustomerForm] = useState(false);
@@ -264,6 +269,42 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
     : null;
   const selectedCustomerTransactions = transactions.filter(tr => tr.customerId === selectedCustomerId);
   const selectedCustomerVehicle = selectedCustomer?.vehicleId ? vehicleById.get(selectedCustomer.vehicleId) : undefined;
+  const selectedCustomerActiveMembership = useMemo(() => {
+    if (!selectedCustomerId) return undefined;
+    return customerMemberships
+      .filter(membership => membership.customerId === selectedCustomerId && membership.isActive)
+      .sort((a, b) => new Date(b.startAt || b.createdAt).getTime() - new Date(a.startAt || a.createdAt).getTime())[0];
+  }, [customerMemberships, selectedCustomerId]);
+
+  useEffect(() => {
+    if (!selectedCustomerActiveMembership) {
+      setMembershipPrepaidBalance(null);
+      return;
+    }
+
+    let isCancelled = false;
+    setMembershipPrepaidLoading(true);
+    getMembershipPrepaidBalance(selectedCustomerActiveMembership.id)
+      .then(({ balance }) => {
+        if (!isCancelled) {
+          setMembershipPrepaidBalance(balance ?? Math.max(0, Number(selectedCustomerActiveMembership.prepaidAmount || 0)));
+        }
+      })
+      .catch(() => {
+        if (!isCancelled) {
+          setMembershipPrepaidBalance(Math.max(0, Number(selectedCustomerActiveMembership.prepaidAmount || 0)));
+        }
+      })
+      .finally(() => {
+        if (!isCancelled) {
+          setMembershipPrepaidLoading(false);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [selectedCustomerActiveMembership]);
   const selectedFormVehicle = selectedVehicleId ? vehicleById.get(selectedVehicleId) : undefined;
   const vehicleSearchOptions = useMemo(() => {
     return [...vehicles]
@@ -743,6 +784,25 @@ const CustomerPage: React.FC<CustomerPageProps> = ({
                   <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl text-sm font-bold text-amber-900 dark:bg-amber-900/10 dark:border-amber-900/20 dark:text-amber-200">
                     {selectedCustomer.notes}
                   </div>
+                </div>
+              )}
+
+              {/* ── Account Balance Widget ── */}
+              {!hideFinancialData && (
+                <div>
+                  {selectedCustomerActiveMembership && (
+                    <div className="mb-4">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">{language === 'zh' ? '會員預付餘額' : 'Membership Prepaid Balance'}</p>
+                      <div className="p-4 rounded-2xl bg-gradient-to-br from-emerald-50 to-teal-50 dark:from-emerald-900/20 dark:to-teal-900/20 border border-emerald-100 dark:border-emerald-900/30">
+                        <p className="text-[10px] font-black uppercase tracking-widest text-emerald-500 mb-1">RMB {language === 'zh' ? '剩餘預付金' : 'Remaining Prepaid'}</p>
+                        {membershipPrepaidLoading
+                          ? <p className="text-sm font-black text-slate-400">{language === 'zh' ? '載入中...' : 'Loading...'}</p>
+                          : <p className="text-2xl font-black text-emerald-600">¥{Number(membershipPrepaidBalance || 0).toFixed(2)}</p>
+                        }
+                        <p className="mt-1 text-[10px] font-bold text-slate-400">{language === 'zh' ? '以會員預付金計算實時餘額' : 'Live remaining balance from membership prepaid usage'}</p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 

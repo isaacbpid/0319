@@ -169,9 +169,9 @@ export interface MembershipTier {
   id: string;
   name: string;
   statusPointsThreshold: number;
-  discountRate: number;
+  discountedRate: number;
   discountEligibleCarLimit: number;
-  upgradeThreshold: number;
+  complimentaryCarCareUpgrade: number;
   priorityLevel: number;
   exclusiveEvents: boolean;
   isActive: boolean;
@@ -179,20 +179,18 @@ export interface MembershipTier {
   updatedAt?: string;
 
   // Extended benefit model fields.
-  statusPoints: number;
   birthdayGift: boolean;
-  discountedRate: number;
   linkedLicensePlates: number;
-  complimentaryCarCareUpgrade: number;
+  hzmbService: number;
   priorityWash: number;
-  exclusiveInvitation: boolean;
+  evChargingRates: number;
 }
 
 export interface CustomerMembership {
   id: string;
   customerId: string;
   tierId: string;
-  discountRateSnapshot: number;
+  discountedRateSnapshot: number;
   discountEligibleCarLimitSnapshot: number;
   priorityLevelSnapshot: number;
   exclusiveEventsSnapshot: boolean;
@@ -206,11 +204,62 @@ export interface CustomerMembership {
   // Extended benefit model snapshots.
   statusPointsSnapshot: number;
   birthdayGiftSnapshot: boolean;
-  discountedRateSnapshot: number;
   linkedLicensePlatesSnapshot: number;
+  hzmbServiceSnapshot: number;
   complimentaryCarCareUpgradeSnapshot: number;
   priorityWashSnapshot: number;
   exclusiveInvitationSnapshot: boolean;
+
+  // Running membership number (YYXXXX) and primary vehicle.
+  membershipNo?: string;
+  primaryVehicleId?: string;
+
+  // Prepaid amount and validity.
+  prepaidAmount?: number;
+  validTill?: string;
+}
+
+export interface MembershipPointsLedger {
+  id: string;
+  membershipId: string;
+  customerId: string;
+  entryType: 'add' | 'redeem' | 'refund_add';
+  pointsDelta: number;
+  pointsBalanceAfter: number;
+  referenceType?: string;
+  referenceId?: string;
+  notes?: string;
+  createdBy?: string;
+  createdAt: string;
+}
+
+export type MembershipBenefitType = 'car_care_upgrade' | 'hzmb_shuttle';
+
+export interface MembershipBenefitRedemption {
+  id: string;
+  membershipId: string;
+  customerId: string;
+  benefitType: MembershipBenefitType;
+  quantity: number;
+  checkoutSaleId?: string;
+  checkoutLineItemId?: string;
+  status: 'active' | 'reversed';
+  createdBy?: string;
+  createdAt: string;
+  reversedAt?: string;
+}
+
+export interface MembershipBenefitServiceRule {
+  id: string;
+  categoryId: string;
+  benefitType: MembershipBenefitType;
+  couponCodeTemplate: string;
+  discountMode: 'full_line' | 'fixed_amount' | 'percent';
+  discountValue: number;
+  isActive: boolean;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface CustomerGroup {
@@ -281,7 +330,9 @@ export enum PaymentMethod {
   ALIPAY = 'Alipay',
   WECHAT = 'wechat',
   MOP_CASH = 'MOP_cash',
-  MPAY = 'MPay'
+  MPAY = 'MPay',
+  POINTS = 'POINTS',
+  PREPAID = 'PREPAID'
 }
 
 export enum PaymentCurrency {
@@ -310,6 +361,23 @@ export interface CheckoutOrderLine {
   estimatedDurationMinutes?: number;
   serviceNameSnapshot?: string;
   isDiscount: boolean;
+  /** Optional membership benefit coupon applied to this line. */
+  benefitType?: MembershipBenefitType;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export type LockerServiceType = 'deposit_only' | 'pickup_only' | 'deposit_and_pickup';
+
+export type PaymentSourceType = 'prepaid' | 'cash' | 'card' | 'wechat' | 'alipay' | 'bank_transfer' | 'other';
+
+export interface CheckoutPaymentSplit {
+  id: string;
+  checkoutId: string;
+  paymentSource: PaymentSourceType;
+  amountPaid: number;
+  membershipId?: string;
+  notes?: string;
   createdAt: string;
   updatedAt?: string;
 }
@@ -353,9 +421,41 @@ export interface CheckoutOrder {
   paidAt?: string;
   linkedTransactionId?: string;
   invoiceNumber?: string;
+  lockerServiceType?: LockerServiceType;
+  lockerDepositReservationId?: string;
+  lockerPickupReservationId?: string;
+  paymentSplits?: CheckoutPaymentSplit[];
   createdAt: string;
   updatedAt?: string;
   lines: CheckoutOrderLine[];
+}
+
+export type LockerReservationType = 'deposit' | 'pickup';
+export type LockerReservationStatus = 'reserved' | 'stored' | 'collected' | 'cancelled';
+
+export interface Locker {
+  id: string;
+  locationCode: string;
+  lockerNumber: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface LockerReservation {
+  id: string;
+  lockerId: string;
+  checkoutOrderId?: string;
+  vehicleId?: string;
+  plateNumber: string;
+  reservationType: LockerReservationType;
+  status: LockerReservationStatus;
+  itemDescription?: string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt?: string;
+  storedAt?: string;
+  collectedAt?: string;
 }
 
 // New database schema types
@@ -529,6 +629,8 @@ export type EmployeePageKey =
   | 'checkout'
   | 'completed_checkout'
   | 'service_lifecycle'
+  | 'locker_deposit'
+  | 'locker_pickup'
   | 'categories'
   | 'accounts'
   | 'memberships'

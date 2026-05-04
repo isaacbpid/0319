@@ -166,8 +166,10 @@ export const translations = {
     transactionNotes: "交易備註 (Notepad)",
     offlineMessage: "數據庫連接失敗。請刷新頁面以重試。",
     refresh: "刷新",
-    checkout: "New Sale",
+    checkout: "結帳",
     completed_checkout: "已完成訂單",
+    locker_deposit: "Locker 存放",
+    locker_pickup: "Locker 取件",
   },
   en: {
     settings: "Settings",
@@ -336,6 +338,8 @@ export const translations = {
     offlineMessage: "Database connection failed. Please refresh to retry.",
     refresh: "Refresh",
     checkout: "New Sale",
-    completed_checkout: "Completed Checkout"
+    completed_checkout: "Completed Checkout",
+    locker_deposit: "Locker Deposit",
+    locker_pickup: "Locker Pickup"
   }
 };

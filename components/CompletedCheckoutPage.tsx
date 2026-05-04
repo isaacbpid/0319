@@ -6,10 +6,12 @@ import {
   Customer,
   CustomerMembership,
   DiscountItem,
+  MembershipTier,
   PaymentCurrency,
   PaymentMethod,
   Vehicle,
 } from '../types';
+import { getMembershipPrepaidBalance } from '../services/database';
 import { convertCurrencyAmount, getApplicableExchangeRate } from '../utils/currencyConversion';
 import invoiceFieldsCsv from '../invoice_fields.csv?raw';
 import invoiceTemplateA4Url from '../invoice_template.png';
@@ -20,10 +22,13 @@ interface CompletedCheckoutPageProps {
   customers: Customer[];
   vehicles: Vehicle[];
   customerMemberships: CustomerMembership[];
+  membershipTiers: MembershipTier[];
   discounts: DiscountItem[];
   checkoutOrders: CheckoutOrder[];
   exchangeRates: CurrencyExchangeRate[];
   onMarkOrderPaid: (orderId: string, paymentMethod: PaymentMethod, paymentCurrency: PaymentCurrency) => Promise<void>;
+  onMarkOrderPaidWithPoints: (orderId: string) => Promise<{ error?: string }>;
+  onMarkOrderPaidWithPrepaid: (orderId: string) => Promise<{ error?: string }>;
   onDeleteOrder: (orderId: string) => Promise<void>;
   initialOpenOrderId?: string | null;
   onInitialOpenOrderHandled?: () => void;
@@ -126,10 +131,13 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
   customers,
   vehicles,
   customerMemberships,
+  membershipTiers,
   discounts,
   checkoutOrders,
   exchangeRates,
   onMarkOrderPaid,
+  onMarkOrderPaidWithPoints,
+  onMarkOrderPaidWithPrepaid,
   onDeleteOrder,
   initialOpenOrderId,
   onInitialOpenOrderHandled,
@@ -143,6 +151,7 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
   const [dateFilter, setDateFilter] = useState<DateFilter>('ALL');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [prepaidBalanceByMembershipId, setPrepaidBalanceByMembershipId] = useState<Record<string, number>>({});
 
   const invoiceFieldMap = useMemo(() => parseInvoiceFieldDefinitions(invoiceFieldsCsv), []);
 
@@ -168,14 +177,45 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
     return map;
   }, [customerMemberships]);
 
+  useEffect(() => {
+    let isCancelled = false;
+    const activeMemberships = customerMemberships.filter(membership => membership.isActive);
+
+    if (activeMemberships.length === 0) {
+      setPrepaidBalanceByMembershipId({});
+      return;
+    }
+
+    void (async () => {
+      const entries = await Promise.all(activeMemberships.map(async membership => {
+        const { balance } = await getMembershipPrepaidBalance(membership.id);
+        return [membership.id, balance ?? Math.max(0, Number(membership.prepaidAmount || 0))] as const;
+      }));
+
+      if (!isCancelled) {
+        setPrepaidBalanceByMembershipId(Object.fromEntries(entries));
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [customerMemberships]);
+
   const getMembershipDiscountRateForCustomer = (customerId?: string): number => {
     if (!customerId) return 0;
     const membership = activeMembershipByCustomerId.get(customerId);
     if (!membership) return 0;
-    const rate = Number.isFinite(membership.discountedRateSnapshot)
-      ? membership.discountedRateSnapshot
-      : membership.discountRateSnapshot;
+    const rate = membership.discountedRateSnapshot;
     return Math.max(0, Math.min(100, Number(rate || 0)));
+  };
+
+  const getMembershipTierLabelForCustomer = (customerId?: string): string => {
+    if (!customerId) return language === 'zh' ? '散客' : 'GUEST';
+    const membership = activeMembershipByCustomerId.get(customerId);
+    if (!membership) return language === 'zh' ? '散客' : 'GUEST';
+    const tierName = membershipTiers.find(tier => tier.id === membership.tierId)?.name;
+    return (tierName || membership.tierId || (language === 'zh' ? '會員' : 'MEMBER')).toUpperCase();
   };
 
   const discountsByCode = useMemo(() => {
@@ -204,6 +244,19 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
       return Number(((safeGross * Math.max(0, item.amount)) / 100).toFixed(2));
     }
     return Number(Math.max(0, item.amount).toFixed(2));
+  };
+
+  const calculateBenefitDiscountTotal = (order: CheckoutOrder): number => {
+    const benefitLabels = new Set([
+      'HZMB Coupon Discount',
+      '港珠澳優惠券折扣',
+      'Car Care Upgrade Coupon Discount',
+      'Car Care 升級券折扣',
+    ]);
+    return Number(order.lines
+      .filter(line => line.isDiscount && benefitLabels.has((line.name || '').trim()))
+      .reduce((sum, line) => sum + Math.max(0, Number(line.lineSubtotal || 0)), 0)
+      .toFixed(2));
   };
 
   const checkedOut = useMemo(() => {
@@ -311,6 +364,46 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
   const confirmTransaction = async () => {
     if (!selectedOrder || isReadOnly) return;
 
+    if (paymentMethod === PaymentMethod.POINTS) {
+      const activeMembership = activeMembershipByCustomerId.get(selectedOrder.customerId || '');
+      if (!activeMembership) {
+        setPaymentError(language === 'zh' ? '該客戶沒有有效會員' : 'Customer has no active membership');
+        return;
+      }
+      if (activeMembership.statusPoints < selectedOrder.netAmount) {
+        setPaymentError(
+          language === 'zh'
+            ? `積分不足，現有 ${activeMembership.statusPoints} 點，需要 ${selectedOrder.netAmount} 點`
+            : `Insufficient points: have ${activeMembership.statusPoints}, need ${selectedOrder.netAmount}`
+        );
+        return;
+      }
+      setPaymentError('');
+      const result = await onMarkOrderPaidWithPoints(selectedOrder.id);
+      if (result?.error) {
+        setPaymentError(result.error);
+        return;
+      }
+      setPaymentSuccess({ currency: PaymentCurrency.RMB, amount: selectedOrder.netAmount });
+      return;
+    }
+
+    if (paymentMethod === PaymentMethod.PREPAID) {
+      const activeMembership = activeMembershipByCustomerId.get(selectedOrder.customerId || '');
+      if (!activeMembership) {
+        setPaymentError(language === 'zh' ? '該客戶沒有有效會員' : 'Customer has no active membership');
+        return;
+      }
+      setPaymentError('');
+      const result = await onMarkOrderPaidWithPrepaid(selectedOrder.id);
+      if (result?.error) {
+        setPaymentError(result.error);
+        return;
+      }
+      setPaymentSuccess({ currency: PaymentCurrency.RMB, amount: selectedOrder.netAmount });
+      return;
+    }
+
     if (selectedPaymentAmount == null && selectedPaymentCurrency !== PaymentCurrency.RMB) {
       setPaymentError(language === 'zh' ? `缺少 RMB 至 ${selectedPaymentCurrency} 的匯率設定` : `Missing exchange rate from RMB to ${selectedPaymentCurrency}`);
       return;
@@ -326,13 +419,23 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
   const downloadReceiptSummary = (order: CheckoutOrder) => {
     const customer = customerMap.get(order.customerId || '');
     const vehicle = vehicleMap.get(order.vehicleId || '');
-    const orderCodeDiscount = calculateCodeAmount(order.grossAmount, resolveDiscountByCode(order.discountCode || '', 'discount'));
+    const benefitDiscountTotal = calculateBenefitDiscountTotal(order);
+    const postBenefitGross = Math.max(0, order.grossAmount - benefitDiscountTotal);
+    const orderCodeDiscount = calculateCodeAmount(postBenefitGross, resolveDiscountByCode(order.discountCode || '', 'discount'));
+    const memberTierLabel = getMembershipTierLabelForCustomer(order.customerId);
+    const configuredMemberRate = getMembershipDiscountRateForCustomer(order.customerId);
+    const appliedMemberRate = postBenefitGross > 0
+      ? Number(((Math.max(0, Number(order.membershipDiscountAmount || 0)) / postBenefitGross) * 100).toFixed(2))
+      : 0;
     const serviceLines = order.lines.filter(line => !line.isDiscount);
-    const lineText = serviceLines.length === 0
+    const discountLines = order.lines.filter(line => line.isDiscount);
+    const lineTextRows = [
+      ...serviceLines.map(line => `- ${line.name} x${line.quantity} @ ${formatCurrency(line.unitPrice)} = ${formatCurrency(line.lineSubtotal)}`),
+      ...discountLines.map(line => `- ${line.name} = -${formatCurrency(Math.max(0, Number(line.lineSubtotal || 0)))}`),
+    ];
+    const lineText = lineTextRows.length === 0
       ? (language === 'zh' ? '無服務項目' : 'No service items')
-      : serviceLines
-          .map(line => `- ${line.name} x${line.quantity} @ ${formatCurrency(line.unitPrice)} = ${formatCurrency(line.lineSubtotal)}`)
-          .join('\n');
+      : lineTextRows.join('\n');
 
     const content = [
       language === 'zh' ? '結帳收據摘要' : 'Checkout Receipt Summary',
@@ -341,6 +444,8 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
       `${language === 'zh' ? '狀態' : 'Status'}: ${order.status}`,
       `${language === 'zh' ? '客戶' : 'Customer'}: ${customer?.name || '-'}`,
       `${language === 'zh' ? '車牌' : 'License Plate'}: ${vehicle?.licensePlate || '-'}`,
+      `${language === 'zh' ? '會員級別' : 'Member Tier'}: ${memberTierLabel}`,
+      `${language === 'zh' ? '會員折扣級別' : 'Member Discount Level'}: ${configuredMemberRate.toFixed(0)}% (${language === 'zh' ? '實際套用' : 'Applied'} ${appliedMemberRate.toFixed(0)}%)`,
       `${language === 'zh' ? 'Check-In' : 'Check-In'}: ${formatDateTime(order.checkInAt)}`,
       `${language === 'zh' ? '完成結帳' : 'Checked Out'}: ${formatDateTime(order.checkedOutAt)}`,
       '',
@@ -375,7 +480,9 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
   const printReceiptWithTemplate = async (order: CheckoutOrder, mode: 'a4' | 'thermal', direct = false) => {
     const customer = customerMap.get(order.customerId || '');
     const vehicle = vehicleMap.get(order.vehicleId || '');
-    const orderCodeDiscount = calculateCodeAmount(order.grossAmount, resolveDiscountByCode(order.discountCode || '', 'discount'));
+    const benefitDiscountTotal = calculateBenefitDiscountTotal(order);
+    const postBenefitGross = Math.max(0, order.grossAmount - benefitDiscountTotal);
+    const orderCodeDiscount = calculateCodeAmount(postBenefitGross, resolveDiscountByCode(order.discountCode || '', 'discount'));
     const templateUrl = mode === 'a4' ? invoiceTemplateA4Url : invoiceTemplateThermalUrl;
     let templateSrc = templateUrl;
     try {
@@ -393,14 +500,17 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
       templateSrc = templateUrl;
     }
     const serviceLines = order.lines.filter(line => !line.isDiscount);
+    const discountLines = order.lines.filter(line => line.isDiscount);
     const createdAtText = formatDateTime(order.checkInAt || order.createdAt);
     const checkedOutText = formatDateTime(order.checkedOutAt || order.updatedAt);
 
     const buildA4Html = () => {
       const activeMembership = activeMembershipByCustomerId.get(order.customerId || '');
-      const membershipTierText = activeMembership
-        ? `${Number(getMembershipDiscountRateForCustomer(order.customerId)).toFixed(0)}%`
-        : 'GUEST';
+      const membershipTierText = getMembershipTierLabelForCustomer(order.customerId);
+      const configuredMemberRate = getMembershipDiscountRateForCustomer(order.customerId);
+      const membershipRateLabel = postBenefitGross > 0
+        ? `${((order.membershipDiscountAmount / postBenefitGross) * 100).toFixed(0)}%`
+        : `${configuredMemberRate.toFixed(0)}%`;
       const contactThruText = customer?.phone || customer?.name || '-';
       const contactMethodText = customer?.phone ? (language === 'zh' ? '電話' : 'Phone') : '-';
       const carMakeModelText = [vehicle?.make, vehicle?.model].filter(Boolean).join(' ') || '-';
@@ -458,7 +568,8 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
         fieldFromCsv('License plate', vehicle?.licensePlate || '-', 28, { x: 100, y: 40, fontSize: 10, alignment: 'center' }),
         fieldFromCsv('Customer name', customer?.name || '-', 28, { x: 140, y: 40, fontSize: 10, alignment: 'center' }),
         fieldFromCsv('Payment Currency', order.paymentCurrency || PaymentCurrency.RMB, 22, { x: 180, y: 40, fontSize: 10, alignment: 'center' }),
-        fieldFromCsv('membership tier', membershipTierText, 20, { x: 215, y: 40, fontSize: 10, alignment: 'center' }),
+        // Keep tier label concise in this narrow metadata slot to avoid ellipsis.
+        fieldFromCsv('membership tier', membershipTierText, 30, { x: 215, y: 40, fontSize: 10, alignment: 'center' }),
         fieldFromCsv('contact thru', contactThruText, 22, { x: 40, y: 55, fontSize: 9, alignment: 'center' }),
         fieldFromCsv('expected pick up time', expectedPickupText, 30, { x: 60, y: 55, fontSize: 9, alignment: 'center' }),
         fieldFromCsv('Car Make', carMakeModelText, 30, { x: 100, y: 55, fontSize: 9, alignment: 'center' }),
@@ -474,15 +585,68 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
       const amountAnchor = resolveField('Amount', { x: 140, y: 75, fontSize: 10, alignment: 'center' });
       const rowStartY = lineAnchor.y;
       const rowStep = 10;
-      const printableRows = serviceLines.slice(0, maxRows);
-      const lineRows = (printableRows.length > 0 ? printableRows : [{ name: '-', quantity: 0, unitPrice: 0, lineSubtotal: 0 } as any])
+      const serviceRows: Array<{ name: string; quantity: string; unitPrice: string; lineSubtotal: string }> = serviceLines.map(line => ({
+        name: line.name,
+        quantity: String(line.quantity || 1),
+        unitPrice: formatCurrency(line.unitPrice || 0),
+        lineSubtotal: formatCurrency(line.lineSubtotal || 0),
+      }));
+
+      const benefitDiscountRows: Array<{ name: string; quantity: string; unitPrice: string; lineSubtotal: string }> = discountLines.map(line => ({
+        name: line.name,
+        quantity: '-',
+        unitPrice: '-',
+        lineSubtotal: `-${formatCurrency(Math.max(0, Number(line.lineSubtotal || 0)))}`,
+      }));
+
+      const adjustmentRows: Array<{ name: string; quantity: string; unitPrice: string; lineSubtotal: string }> = [];
+      if ((order.largeVehicleSurchargeAmount || 0) > 0) {
+        adjustmentRows.push({
+          name: language === 'zh' ? '大型車加收' : 'Large Vehicle Surcharge',
+          quantity: '-',
+          unitPrice: '-',
+          lineSubtotal: `+${formatCurrency(order.largeVehicleSurchargeAmount || 0)}`,
+        });
+      }
+      if ((order.membershipDiscountAmount || 0) > 0) {
+        adjustmentRows.push({
+          name: language === 'zh'
+            ? `會員折扣 (${membershipRateLabel})`
+            : `Membership Discount (${membershipRateLabel})`,
+          quantity: '-',
+          unitPrice: '-',
+          lineSubtotal: `-${formatCurrency(order.membershipDiscountAmount || 0)}`,
+        });
+      }
+      if ((order.couponDiscountAmount || 0) > 0 && discountLines.length === 0) {
+        adjustmentRows.push({
+          name: language === 'zh' ? '優惠券折扣' : 'Coupon Discount',
+          quantity: '-',
+          unitPrice: '-',
+          lineSubtotal: `-${formatCurrency(order.couponDiscountAmount || 0)}`,
+        });
+      }
+      if (orderCodeDiscount > 0) {
+        adjustmentRows.push({
+          name: language === 'zh' ? '代碼折扣' : 'Code Discount',
+          quantity: '-',
+          unitPrice: '-',
+          lineSubtotal: `-${formatCurrency(orderCodeDiscount)}`,
+        });
+      }
+
+      // Always keep calculation rows (discount/surcharge) visible; trim service rows first.
+      const fixedRows = [...benefitDiscountRows, ...adjustmentRows];
+      const serviceCapacity = Math.max(0, maxRows - fixedRows.length);
+      const printableRows = [...serviceRows.slice(0, serviceCapacity), ...fixedRows].slice(0, maxRows);
+      const lineRows = (printableRows.length > 0 ? printableRows : [{ name: '-', quantity: '-', unitPrice: '-', lineSubtotal: '-' } as any])
         .map((line: any, index: number) => {
           const y = rowStartY + (index * rowStep);
           return [
             field(line.name, lineAnchor.x, y, lineAnchor.fontSize, 118, lineAnchor.alignment),
-            field(line.quantity > 0 ? String(line.quantity) : '-', qtyAnchor.x, y, qtyAnchor.fontSize, 14, qtyAnchor.alignment),
-            field(line.unitPrice > 0 ? formatCurrency(line.unitPrice) : '-', unitPriceAnchor.x, y, unitPriceAnchor.fontSize, 20, unitPriceAnchor.alignment),
-            field(line.lineSubtotal > 0 ? formatCurrency(line.lineSubtotal) : '-', amountAnchor.x, y, amountAnchor.fontSize, 24, amountAnchor.alignment),
+            field(line.quantity, qtyAnchor.x, y, qtyAnchor.fontSize, 14, qtyAnchor.alignment),
+            field(line.unitPrice, unitPriceAnchor.x, y, unitPriceAnchor.fontSize, 20, unitPriceAnchor.alignment),
+            field(line.lineSubtotal, amountAnchor.x, y, amountAnchor.fontSize, 24, amountAnchor.alignment),
           ].join('');
         })
         .join('');
@@ -501,11 +665,66 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
     };
 
     const buildThermalHtml = () => {
-      const rowsHtml = serviceLines.length > 0
-        ? serviceLines.map(line => `<tr><td>${htmlEscape(line.name)}</td><td>${htmlEscape(formatCurrency(line.unitPrice))}</td><td>${htmlEscape(line.quantity)}</td><td>${htmlEscape(formatCurrency(line.lineSubtotal))}</td></tr>`).join('')
+      const membershipTierText = getMembershipTierLabelForCustomer(order.customerId);
+      const configuredMemberRate = getMembershipDiscountRateForCustomer(order.customerId);
+      const membershipRateLabel = postBenefitGross > 0
+        ? `${((order.membershipDiscountAmount / postBenefitGross) * 100).toFixed(0)}%`
+        : `${configuredMemberRate.toFixed(0)}%`;
+      const invoiceRows: Array<{ name: string; rate: string; qty: string; amount: string }> = [
+        ...serviceLines.map(line => ({
+          name: line.name,
+          rate: formatCurrency(line.unitPrice),
+          qty: String(line.quantity),
+          amount: formatCurrency(line.lineSubtotal),
+        })),
+        ...discountLines.map(line => ({
+          name: line.name,
+          rate: '-',
+          qty: '-',
+          amount: `-${formatCurrency(Math.max(0, Number(line.lineSubtotal || 0)))}`,
+        })),
+      ];
+
+      if ((order.largeVehicleSurchargeAmount || 0) > 0) {
+        invoiceRows.push({
+          name: language === 'zh' ? '大型車加收' : 'Large Vehicle Surcharge',
+          rate: '-',
+          qty: '-',
+          amount: `+${formatCurrency(order.largeVehicleSurchargeAmount || 0)}`,
+        });
+      }
+      if ((order.membershipDiscountAmount || 0) > 0) {
+        invoiceRows.push({
+          name: language === 'zh'
+            ? `會員折扣 (${membershipRateLabel})`
+            : `Membership Discount (${membershipRateLabel})`,
+          rate: '-',
+          qty: '-',
+          amount: `-${formatCurrency(order.membershipDiscountAmount || 0)}`,
+        });
+      }
+      if ((order.couponDiscountAmount || 0) > 0 && discountLines.length === 0) {
+        invoiceRows.push({
+          name: language === 'zh' ? '優惠券折扣' : 'Coupon Discount',
+          rate: '-',
+          qty: '-',
+          amount: `-${formatCurrency(order.couponDiscountAmount || 0)}`,
+        });
+      }
+      if (orderCodeDiscount > 0) {
+        invoiceRows.push({
+          name: language === 'zh' ? '代碼折扣' : 'Code Discount',
+          rate: '-',
+          qty: '-',
+          amount: `-${formatCurrency(orderCodeDiscount)}`,
+        });
+      }
+
+      const rowsHtml = invoiceRows.length > 0
+        ? invoiceRows.map(line => `<tr><td>${htmlEscape(line.name)}</td><td>${htmlEscape(line.rate)}</td><td>${htmlEscape(line.qty)}</td><td>${htmlEscape(line.amount)}</td></tr>`).join('')
         : `<tr><td colspan="4" style="text-align:center;">${htmlEscape(language === 'zh' ? '無服務項目' : 'No service items')}</td></tr>`;
 
-      return `<!doctype html><html><head><meta charset="UTF-8" /><title>${htmlEscape(language === 'zh' ? '收據列印' : 'Receipt Print')}</title><style>* { box-sizing: border-box; } html, body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } body { font-family: Arial, sans-serif; color: #111; background: #fff; } .sheet { margin: 0 auto; width: 74mm; } .invoice-shell { position: relative; width: 74mm; min-height: 120mm; padding: 74px 28px 20px; border: 1px solid #e5e7eb; overflow: hidden; } .invoice-template { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 0; } .invoice-content { position: relative; z-index: 1; } .hero { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; font-size: 7px; margin-bottom: 12px; } .table { width: 100%; border-collapse: collapse; margin-top: 8px; } .table th, .table td { border: 1px solid #d1d5db; padding: 2px 3px; font-size: 6px; text-align: left; } .totals p { margin: 0; font-size: 6px; } @page { size: 80mm auto; margin: 3mm; }</style></head><body><div class="sheet"><div class="invoice-shell"><img id="invoice-template-image" class="invoice-template" src="${htmlEscape(templateSrc)}" alt="invoice template" /><div class="invoice-content"><div class="hero"><div><p><strong>${htmlEscape(language === 'zh' ? 'Invoice #' : 'Invoice #')}:</strong> ${htmlEscape(order.invoiceNumber || order.id.slice(0, 8))}</p><p><strong>${htmlEscape(language === 'zh' ? '車牌' : 'License Plate')}:</strong> ${htmlEscape(vehicle?.licensePlate || '-')}</p></div><div><p><strong>${htmlEscape(language === 'zh' ? '客戶' : 'Client')}:</strong> ${htmlEscape(customer?.name || '-')}</p><p><strong>${htmlEscape(language === 'zh' ? '幣別' : 'Currency')}:</strong> ${htmlEscape(order.paymentCurrency || 'RMB')}</p></div><div><p><strong>${htmlEscape(language === 'zh' ? 'Check-In' : 'Drop Off')}:</strong> ${htmlEscape(createdAtText)}</p><p><strong>${htmlEscape(language === 'zh' ? '完成結帳' : 'Checked Out')}:</strong> ${htmlEscape(checkedOutText)}</p></div></div><table class="table"><thead><tr><th>${htmlEscape(language === 'zh' ? '項目' : 'Description')}</th><th>${htmlEscape(language === 'zh' ? '單價' : 'Rate')}</th><th>${htmlEscape(language === 'zh' ? '數量' : 'Qty.')}</th><th>${htmlEscape(language === 'zh' ? '金額' : 'Amount')}</th></tr></thead><tbody>${rowsHtml}</tbody></table><div class="totals"><p><strong>${htmlEscape(language === 'zh' ? '毛額' : 'Gross')}:</strong> ${htmlEscape(formatCurrency(order.grossAmount))}</p><p><strong>${htmlEscape(language === 'zh' ? '大型車加收' : 'Large Vehicle Surcharge')}:</strong> +${htmlEscape(formatCurrency(order.largeVehicleSurchargeAmount || 0))}</p><p><strong>${htmlEscape(language === 'zh' ? '會員折扣' : 'Membership Discount')}:</strong> -${htmlEscape(formatCurrency(order.membershipDiscountAmount))}</p><p><strong>${htmlEscape(language === 'zh' ? '優惠券折扣' : 'Coupon Discount')}:</strong> -${htmlEscape(formatCurrency(order.couponDiscountAmount))}</p><p><strong>${htmlEscape(language === 'zh' ? '代碼折扣' : 'Code Discount')}:</strong> -${htmlEscape(formatCurrency(orderCodeDiscount))}</p><p><strong>${htmlEscape(language === 'zh' ? '淨額' : 'Net')}:</strong> ${htmlEscape(formatCurrency(order.netAmount))}</p></div></div></div></div><script>(function(){const img=document.getElementById('invoice-template-image');let printed=false;const triggerPrint=()=>{if(printed)return;printed=true;setTimeout(()=>window.print(),350);};window.addEventListener('load',()=>{if(img&&img.complete){triggerPrint();return;}if(img){img.addEventListener('load',triggerPrint,{once:true});img.addEventListener('error',triggerPrint,{once:true});}setTimeout(triggerPrint,1800);});})();</script></body></html>`;
+      return `<!doctype html><html><head><meta charset="UTF-8" /><title>${htmlEscape(language === 'zh' ? '收據列印' : 'Receipt Print')}</title><style>* { box-sizing: border-box; } html, body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } body { font-family: Arial, sans-serif; color: #111; background: #fff; } .sheet { margin: 0 auto; width: 74mm; } .invoice-shell { position: relative; width: 74mm; min-height: 120mm; padding: 74px 28px 20px; border: 1px solid #e5e7eb; overflow: hidden; } .invoice-template { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 0; } .invoice-content { position: relative; z-index: 1; } .hero { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; font-size: 7px; margin-bottom: 12px; } .table { width: 100%; border-collapse: collapse; margin-top: 8px; } .table th, .table td { border: 1px solid #d1d5db; padding: 2px 3px; font-size: 6px; text-align: left; } .totals p { margin: 0; font-size: 6px; } @page { size: 80mm auto; margin: 3mm; }</style></head><body><div class="sheet"><div class="invoice-shell"><img id="invoice-template-image" class="invoice-template" src="${htmlEscape(templateSrc)}" alt="invoice template" /><div class="invoice-content"><div class="hero"><div><p><strong>${htmlEscape(language === 'zh' ? 'Invoice #' : 'Invoice #')}:</strong> ${htmlEscape(order.invoiceNumber || order.id.slice(0, 8))}</p><p><strong>${htmlEscape(language === 'zh' ? '車牌' : 'License Plate')}:</strong> ${htmlEscape(vehicle?.licensePlate || '-')}</p></div><div><p><strong>${htmlEscape(language === 'zh' ? '客戶' : 'Client')}:</strong> ${htmlEscape(customer?.name || '-')}</p><p><strong>${htmlEscape(language === 'zh' ? '幣別' : 'Currency')}:</strong> ${htmlEscape(order.paymentCurrency || 'RMB')}</p></div><div><p><strong>${htmlEscape(language === 'zh' ? 'Check-In' : 'Drop Off')}:</strong> ${htmlEscape(createdAtText)}</p><p><strong>${htmlEscape(language === 'zh' ? '完成結帳' : 'Checked Out')}:</strong> ${htmlEscape(checkedOutText)}</p></div></div><table class="table"><thead><tr><th>${htmlEscape(language === 'zh' ? '項目' : 'Description')}</th><th>${htmlEscape(language === 'zh' ? '單價' : 'Rate')}</th><th>${htmlEscape(language === 'zh' ? '數量' : 'Qty.')}</th><th>${htmlEscape(language === 'zh' ? '金額' : 'Amount')}</th></tr></thead><tbody>${rowsHtml}</tbody></table><div class="totals"><p><strong>${htmlEscape(language === 'zh' ? '會員級別' : 'Member Tier')}:</strong> ${htmlEscape(membershipTierText)}</p><p><strong>${htmlEscape(language === 'zh' ? '會員折扣級別' : 'Member Discount Level')}:</strong> ${htmlEscape(`${configuredMemberRate.toFixed(0)}% (${language === 'zh' ? '實際套用' : 'Applied'} ${membershipRateLabel})`)}</p><p><strong>${htmlEscape(language === 'zh' ? '毛額' : 'Gross')}:</strong> ${htmlEscape(formatCurrency(order.grossAmount))}</p><p><strong>${htmlEscape(language === 'zh' ? '大型車加收' : 'Large Vehicle Surcharge')}:</strong> +${htmlEscape(formatCurrency(order.largeVehicleSurchargeAmount || 0))}</p><p><strong>${htmlEscape(language === 'zh' ? '會員折扣' : 'Membership Discount')}:</strong> -${htmlEscape(formatCurrency(order.membershipDiscountAmount))}</p><p><strong>${htmlEscape(language === 'zh' ? '優惠券折扣' : 'Coupon Discount')}:</strong> -${htmlEscape(formatCurrency(order.couponDiscountAmount))}</p><p><strong>${htmlEscape(language === 'zh' ? '代碼折扣' : 'Code Discount')}:</strong> -${htmlEscape(formatCurrency(orderCodeDiscount))}</p><p><strong>${htmlEscape(language === 'zh' ? '淨額' : 'Net')}:</strong> ${htmlEscape(formatCurrency(order.netAmount))}</p></div></div></div></div><script>(function(){const img=document.getElementById('invoice-template-image');let printed=false;const triggerPrint=()=>{if(printed)return;printed=true;setTimeout(()=>window.print(),350);};window.addEventListener('load',()=>{if(img&&img.complete){triggerPrint();return;}if(img){img.addEventListener('load',triggerPrint,{once:true});img.addEventListener('error',triggerPrint,{once:true});}setTimeout(triggerPrint,1800);});})();</script></body></html>`;
     };
 
     const html = mode === 'a4' ? buildA4Html() : buildThermalHtml();
@@ -594,6 +813,36 @@ const CompletedCheckoutPage: React.FC<CompletedCheckoutPageProps> = ({
                 </button>
               );
             })}
+            {(() => {
+              const activeMembership = activeMembershipByCustomerId.get(selectedOrder.customerId || '');
+              if (!activeMembership) return null;
+              const isSelected = paymentMethod === PaymentMethod.POINTS;
+              return (
+                <button
+                  onClick={() => { setPaymentMethod(PaymentMethod.POINTS); setPaymentError(''); }}
+                  className={`w-full flex items-center justify-between px-4 py-3 rounded-xl border text-sm font-black ${isSelected ? 'border-violet-500 bg-violet-50 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300' : 'border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200'}`}
+                >
+                  <span>{language === 'zh' ? `積分支付（餘額 ${activeMembership.statusPoints} 點）` : `Pay with Points (balance: ${activeMembership.statusPoints} pts)`}</span>
+                  <i className={`fas ${isSelected ? 'fa-check-circle' : 'fa-circle'} text-sm`}></i>
+                </button>
+              );
+            })()}
+            {(() => {
+              const activeMembership = activeMembershipByCustomerId.get(selectedOrder.customerId || '');
+              if (!activeMembership) return null;
+              const prepaidBalance = Number(prepaidBalanceByMembershipId[activeMembership.id] ?? activeMembership.prepaidAmount ?? 0);
+              if (prepaidBalance <= 0) return null;
+              const isSelected = paymentMethod === PaymentMethod.PREPAID;
+              return (
+                <button
+                  onClick={() => { setPaymentMethod(PaymentMethod.PREPAID); setPaymentError(''); }}
+                  className={`w-full flex items-center justify-between px-4 py-3 rounded-xl border text-sm font-black ${isSelected ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300' : 'border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200'}`}
+                >
+                  <span>{language === 'zh' ? `預付款支付（餘額 ${prepaidBalance.toFixed(2)} 元）` : `Pay with Prepaid (balance: ${prepaidBalance.toFixed(2)})`}</span>
+                  <i className={`fas ${isSelected ? 'fa-check-circle' : 'fa-circle'} text-sm`}></i>
+                </button>
+              );
+            })()}
           </div>
 
           {paymentError && <p className="text-sm font-bold text-rose-600">{paymentError}</p>}

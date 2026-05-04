@@ -5,7 +5,7 @@ Drop off time,60,38,10,center,3/1/2026 10:00
 License plate,100,38,10,center,CYFS 188
 Customer name,140,38,10,center,Chan Tai Man
 Payment Currency,175,38,10,center,RMB
-membership tier,210,38,10,center,GUEST
+membership tier,203,38,10,right,GUEST
 contact thru,30,52,10,center,23411121
 expected pick up time,60,52,10,center,3/1/2026 12:00
 Car Make ,100,52,10,center,Toyota RAV4

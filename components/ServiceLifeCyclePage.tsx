@@ -132,6 +132,13 @@ const formatDuration = (startMs: number | null, endMs: number | null): string =>
   return `${Math.max(minutes, 0)}m`;
 };
 
+const isDisplayableServiceLine = (line: CheckoutOrder['lines'][number]): boolean => {
+  if (line.isDiscount !== true) return true;
+  // Some historical rows may carry discount flags incorrectly.
+  // Keep lines that are clearly service-backed so work-order items do not disappear.
+  return Boolean(line.categoryId) || Number(line.estimatedDurationMinutes || 0) > 0;
+};
+
 const getStatusDuration = (order: CheckoutOrder, status: CheckoutOrderStatus, nowMs: number): string => {
   const checkInMs = parseTimeMs(order.checkInAt || order.occurredAt || order.createdAt);
   const committedMs = parseTimeMs(order.committedAt);
@@ -163,7 +170,22 @@ const printWorkOrder = async (
   language: 'zh' | 'en',
   workorderFieldMap: Map<string, WorkorderFieldDef>
 ) => {
-  const serviceLines = order.lines.filter(l => !l.isDiscount);
+  const serviceLines = order.lines.filter(isDisplayableServiceLine);
+  const discountLines = order.lines.filter(line => line.isDiscount);
+  const workorderRows = [
+    ...serviceLines.map(line => ({
+      name: line.name,
+      quantity: line.quantity > 0 ? String(line.quantity) : '-',
+      unitPrice: line.unitPrice > 0 ? formatCurrency(line.unitPrice) : '-',
+      amount: line.lineSubtotal > 0 ? formatCurrency(line.lineSubtotal) : '-',
+    })),
+    ...discountLines.map(line => ({
+      name: line.name,
+      quantity: '-',
+      unitPrice: '-',
+      amount: `-${formatCurrency(Math.max(0, Number(line.lineSubtotal || 0)))}`,
+    })),
+  ];
   const timeIn = formatDateTime(order.checkInAt || order.occurredAt || order.createdAt);
 
   // Fetch the template image as a base64 data URL so the self-contained blob
@@ -286,15 +308,15 @@ const printWorkOrder = async (
   const amountDef = resolve('Amount', { x: 216, y: 108, fontSize: 8, alignment: 'right' });
   const rowStep = 6;
 
-  const lineRows = (serviceLines.length > 0 ? serviceLines : [{ name: '-', quantity: 0, unitPrice: 0, lineSubtotal: 0 } as any])
+  const lineRows = (workorderRows.length > 0 ? workorderRows : [{ name: '-', quantity: '-', unitPrice: '-', amount: '-' } as any])
     .slice(0, 8)
     .map((l: any, i: number) => {
       const y = lineItemDef.y + i * rowStep;
       return [
         field(l.name, lineItemDef.x, y, lineItemDef.fontSize, 80, lineItemDef.alignment),
-        field(l.quantity > 0 ? String(l.quantity) : '-', qtyDef.x, y, qtyDef.fontSize, 14, qtyDef.alignment),
-        field(l.unitPrice > 0 ? formatCurrency(l.unitPrice) : '-', unitPriceDef.x, y, unitPriceDef.fontSize, 22, unitPriceDef.alignment),
-        field(l.lineSubtotal > 0 ? formatCurrency(l.lineSubtotal) : '-', amountDef.x, y, amountDef.fontSize, 22, amountDef.alignment),
+        field(l.quantity, qtyDef.x, y, qtyDef.fontSize, 14, qtyDef.alignment),
+        field(l.unitPrice, unitPriceDef.x, y, unitPriceDef.fontSize, 22, unitPriceDef.alignment),
+        field(l.amount, amountDef.x, y, amountDef.fontSize, 22, amountDef.alignment),
       ].join('');
     }).join('');
 
@@ -602,7 +624,8 @@ const ServiceLifeCyclePage: React.FC<ServiceLifeCyclePageProps> = ({
       vehicleMap.get(selectedOrder.vehicleId || '') ??
       vehicleMap.get(customer?.vehicleId || '');
     const timeIn = formatDateTime(selectedOrder.checkInAt || selectedOrder.occurredAt || selectedOrder.createdAt);
-    const serviceLines = selectedOrder.lines.filter(l => !l.isDiscount);
+    const serviceLines = selectedOrder.lines.filter(isDisplayableServiceLine);
+    const discountLines = selectedOrder.lines.filter(line => line.isDiscount);
     const status = selectedOrder.status;
     const printCurrentWorkOrder = () => {
       void printWorkOrder(
@@ -644,7 +667,8 @@ const ServiceLifeCyclePage: React.FC<ServiceLifeCyclePageProps> = ({
           <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-base font-black text-slate-900 dark:text-white">{customer?.name || (t ? '未指定客戶' : 'No customer')}</p>
-              <p className="text-sm font-bold text-slate-500 dark:text-slate-300">{vehicle?.licensePlate || '-'} {vehicle?.make ? `· ${vehicle.make} ${vehicle.model || ''}`.trim() : ''}</p>
+              <p className="text-sm font-bold text-slate-500 dark:text-slate-300">{vehicle?.licensePlate || '-'}{[vehicle?.make, vehicle?.model].some(Boolean) ? ` · ${[vehicle?.make, vehicle?.model].filter(Boolean).join(' ')}` : ''}</p>
+              {vehicle?.color ? <p className="text-xs font-semibold text-slate-400 mt-0.5">{vehicle.color}</p> : null}
               <p className="text-xs font-semibold text-slate-400 mt-0.5">{t ? '到達時間' : 'Time In'}: {timeIn}</p>
             </div>
             <div className="flex flex-col items-end gap-1 shrink-0">
@@ -661,10 +685,22 @@ const ServiceLifeCyclePage: React.FC<ServiceLifeCyclePageProps> = ({
           <StatusBar current={status} order={selectedOrder} />
 
           <div className="pt-1 space-y-1">
-            {serviceLines.map(l => (
-              <div key={l.id} className="flex justify-between text-xs font-semibold text-slate-600 dark:text-slate-300">
-                <span>{l.name}</span>
-                <span>{l.quantity > 1 ? `${l.quantity} × ` : ''}{formatCurrency(l.unitPrice)}</span>
+            {serviceLines.length > 0 ? (
+              serviceLines.map(l => (
+                <div key={l.id} className="flex justify-between text-xs font-semibold text-slate-600 dark:text-slate-300">
+                  <span>{l.name}</span>
+                  <span>{l.quantity > 1 ? `${l.quantity} × ` : ''}{formatCurrency(l.unitPrice)}</span>
+                </div>
+              ))
+            ) : (
+              <div className="text-xs font-semibold text-slate-400 dark:text-slate-500">
+                {t ? '無服務項目' : 'No service items'}
+              </div>
+            )}
+            {discountLines.map(line => (
+              <div key={`discount-${line.id}`} className="flex justify-between text-xs font-semibold text-rose-600 dark:text-rose-400">
+                <span>{line.name}</span>
+                <span>-{formatCurrency(Math.max(0, Number(line.lineSubtotal || 0)))}</span>
               </div>
             ))}
             <div className="flex justify-between text-sm font-black text-blue-600 dark:text-blue-400 pt-1 border-t border-slate-100 dark:border-white/10">
